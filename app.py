@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Iterable, List, Optional
+import tifffile as tiff
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
+from swclib.data.swc import Swc, merge_swcs
+from swclib.image.swc2mask import swc_to_mask_sphere_cone
+
+from vaa3d_utils import *
+
+
+
+# -----------------------------
+# Config
+# -----------------------------
+ALLOWED_EXT = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+
+BASE_DIR = Path(__file__).resolve().parent
+RUNS_DIR = BASE_DIR / "runs"
+
+NEUTUBE_BIN = BASE_DIR / "algorithms" / "neuTube"
+VAA3D_BIN = Path("/data1/yangzekang/neuron/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x")
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def ensure_executable(path: Path, name: str = "binary") -> None:
+    if not path.exists():
+        raise HTTPException(status_code=500, detail=f"{name} not found: {path}")
+    if not os.access(path, os.X_OK):
+        raise HTTPException(status_code=500, detail=f"{name} not executable: {path}")
+
+
+def cleanup_runs_worker(interval_hours: int = 2, max_age_hours: int = 24) -> None:
+    """Periodically delete old run directories under RUNS_DIR."""
+    while True:
+        now = time.time()
+        if RUNS_DIR.exists():
+            for d in RUNS_DIR.iterdir():
+                if not d.is_dir():
+                    continue
+                age_hours = (now - d.stat().st_mtime) / 3600
+                if age_hours > max_age_hours:
+                    print(f"[cleanup] removing {d} (age={age_hours:.2f}h)")
+                    shutil.rmtree(d, ignore_errors=True)
+        time.sleep(interval_hours * 3600)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    t = threading.Thread(target=cleanup_runs_worker, daemon=True)
+    t.start()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def make_workdir() -> Path:
+    workdir = RUNS_DIR / str(uuid.uuid4())
+    workdir.mkdir(parents=True, exist_ok=True)
+    return workdir
+
+
+async def save_upload_to(upload: UploadFile, dst: Path) -> None:
+    """Save UploadFile to dst, then close upload."""
+    try:
+        with dst.open("wb") as f:
+            shutil.copyfileobj(upload.file, f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save upload: {e}")
+    finally:
+        await upload.close()
+
+
+def check_suffix(filename: str) -> None:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_EXT:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+
+
+def run_cmd(cmd: List[str], log_path: Path, workdir: Path, timeout_sec: int = 3600) -> None:
+    """Run a command, writing stdout+stderr to log_path."""
+    try:
+        with log_path.open("wb") as logf:
+            print("[run]", " ".join(cmd))
+            subprocess.run(
+                cmd,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                cwd=str(workdir),
+                check=True,
+                timeout=timeout_sec,
+            )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Command timed out")
+    except subprocess.CalledProcessError:
+        try:
+            text = log_path.read_text(errors="ignore")[-5000:]
+        except Exception:
+            text = "(failed to read log)"
+        raise HTTPException(status_code=500, detail=f"Command failed. Tail log:\n{text}")
+
+
+def file_response_or_500(path: Path, filename: str = "output.swc") -> FileResponse:
+    if not path.exists() or path.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail=f"{filename} not generated or empty")
+    return FileResponse(
+        path=str(path),
+        media_type="application/octet-stream",
+        filename=filename,
+    )
+
+
+# -----------------------------
+# Routes
+# -----------------------------
+@app.get("/hello")
+def hello():
+    return {"ok": True}
+
+
+@app.post("/trace_neutube")
+async def trace_neutube(file: UploadFile = File(...)):
+    check_suffix(file.filename)
+
+    ensure_executable(NEUTUBE_BIN, name="neuTube")
+
+    workdir = make_workdir()
+    local_input = workdir / "vol.tiff"
+    local_output = workdir / "output.swc"
+    local_log = workdir / "log.txt"
+
+    await save_upload_to(file, local_input)
+
+    cmd = [
+        str(NEUTUBE_BIN),
+        "--command",
+        str(local_input),
+        "--trace",
+        "-o",
+        str(local_output),
+        "--level",
+        "0",
+    ]
+    run_cmd(cmd, local_log, workdir)
+
+    return file_response_or_500(local_output, filename="output.swc")
+
+
+# @app.post("/trace_vaa3d_app2")
+# async def trace_vaa3d_app2(file: UploadFile = File(...)):
+#     check_suffix(file.filename)
+
+#     ensure_executable(VAA3D_BIN, name="Vaa3D")
+
+#     workdir = make_workdir()
+#     local_input = workdir / "vol.tiff"
+#     swc_file = workdir / "output.swc"
+#     local_log = workdir / "log.txt"
+
+#     await save_upload_to(file, local_input)
+
+#     # Read & normalize to uint8, then write a temp tiff for Vaa3D
+#     img = tiff.imread(local_input)
+#     img_u8 = to_uint8_0_255(img)
+
+#     tif_file = workdir / "vol_uint8.tiff"
+#     tiff.imwrite(tif_file, img_u8)
+
+#     if img_u8.ndim != 3:
+#         raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
+
+#     D, H, W = img_u8.shape  # noqa: F841
+
+#     cmd = [
+#         str(VAA3D_BIN),
+#         "-x",
+#         "vn2",
+#         "-f",
+#         "app2",
+#         "-i",
+#         str(tif_file),
+#         "-o",
+#         str(swc_file),
+#     ]
+#     run_cmd(cmd, local_log, workdir)
+
+#     # Post-process Vaa3D SWC (your util expects maxy=H)
+#     postprocess_vaa3d_result(swc_file, maxy=H)
+
+#     return file_response_or_500(swc_file, filename="output.swc")
+
+@app.post("/trace_vaa3d_app2")
+async def trace_vaa3d_app2(file: UploadFile = File(...)):
+    check_suffix(file.filename)
+
+    ensure_executable(VAA3D_BIN, name="Vaa3D")
+
+    workdir = make_workdir()
+    local_input = workdir / "vol.tiff"
+    swc_file = workdir / "output.swc"
+    local_log = workdir / "log.txt"
+
+    await save_upload_to(file, local_input)
+
+    # Read & normalize to uint8, then write a temp tiff for Vaa3D
+    img = tiff.imread(local_input)
+    img_u8 = to_uint8_0_255(img)
+
+    tif_file = workdir / "vol_uint8.tiff"
+    tiff.imwrite(tif_file, img_u8)
+
+    if img_u8.ndim != 3:
+        raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
+
+    D, H, W = img_u8.shape  # noqa: F841
+
+    # Iterative tracing settings
+    max_iters = 64                  # hard stop to avoid infinite loops
+    min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
+
+    swcs = []
+    for it in range(max_iters):
+        tiff.imwrite(tif_file, img_u8)
+
+        swc_file = workdir / f"output_{it:03d}.swc"
+
+        cmd = [
+            str(VAA3D_BIN),
+            "-x", "vn2",
+            "-f", "app2",
+            "-i", str(tif_file),
+            "-o", str(swc_file),
+        ]
+        run_cmd(cmd, local_log, workdir)
+        postprocess_vaa3d_result(swc_file, maxy=H)
+
+        swc = Swc(swc_file)
+
+        # Stop criteria: empty / no valid nodes / too few nodes
+        if (len(swc.nodes) < min_nodes_to_accept):
+            break
+        swcs.append(swc)
+
+        # Mask this traced tree out of the volume, then continue
+        mask = swc_to_mask_sphere_cone(
+            swc_file,
+            shape=(D, H, W),
+            foreground_value=1,
+            r_scale=3.0
+        )
+        img_u8[mask>0] = np.uint8(0)
+
+    swc_merged = merge_swcs(swcs)
+    merged_swc = workdir / "output.swc"
+    swc_merged.save_to_swc(merged_swc)
+
+    return file_response_or_500(merged_swc, filename="output.swc")
+
+
+@app.post("/trace_kimimacro")
+async def trace_kimimacro(file: UploadFile = File(...)):
+    raise HTTPException(status_code=501, detail="Not implemented")
