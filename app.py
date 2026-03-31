@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import shutil
 import subprocess
@@ -12,6 +11,9 @@ from typing import Iterable, List, Optional
 import tifffile as tiff
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+import asyncio
+import shutil
+from datetime import datetime
 
 from swclib.data.swc import Swc, merge_swcs
 from swclib.image.swc2mask import swc_to_mask_sphere_cone
@@ -29,7 +31,8 @@ BASE_DIR = Path(__file__).resolve().parent
 RUNS_DIR = BASE_DIR / "runs"
 
 NEUTUBE_BIN = BASE_DIR / "algorithms" / "neuTube"
-VAA3D_BIN = Path("/data1/yangzekang/neuron/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x")
+VAA3D_BIN = BASE_DIR / "algorithms" / "Vaa3D-x.1.1.4_Ubuntu" / "Vaa3D-x"
+# VAA3D_BIN = Path("/data1/yangzekang/neuron/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x")
 
 
 # -----------------------------
@@ -68,10 +71,24 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-def make_workdir() -> Path:
-    workdir = RUNS_DIR / str(uuid.uuid4())
-    workdir.mkdir(parents=True, exist_ok=True)
-    return workdir
+# def make_workdir() -> Path:
+#     workdir = RUNS_DIR / str(uuid.uuid4())
+#     workdir.mkdir(parents=True, exist_ok=True)
+#     return workdir
+
+def make_workdir(max_retries: int = 1000) -> Path:
+    base_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 到毫秒
+
+    for i in range(max_retries):
+        name = base_name if i == 0 else f"{base_name}_{i}"
+        workdir = RUNS_DIR / name
+        try:
+            workdir.mkdir(parents=True, exist_ok=False)
+            return workdir
+        except FileExistsError:
+            continue
+
+    raise RuntimeError(f"Failed to create unique workdir after {max_retries} retries.")
 
 
 async def save_upload_to(upload: UploadFile, dst: Path) -> None:
@@ -106,7 +123,10 @@ def run_cmd(cmd: List[str], log_path: Path, workdir: Path, timeout_sec: int = 36
             )
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Command timed out")
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        # if e.returncode == -signal.SIGSEGV and "smartTrace" in cmd:
+        #     # caused by smartTrace
+        #     return False
         try:
             text = log_path.read_text(errors="ignore")[-5000:]
         except Exception:
@@ -246,6 +266,82 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
             "-o", str(swc_file),
         ]
         run_cmd(cmd, local_log, workdir)
+        postprocess_vaa3d_result(swc_file, maxy=H)
+
+        swc = Swc(swc_file)
+
+        # Stop criteria: empty / no valid nodes / too few nodes
+        if (len(swc.nodes) < min_nodes_to_accept):
+            break
+        swcs.append(swc)
+
+        # Mask this traced tree out of the volume, then continue
+        mask = swc_to_mask_sphere_cone(
+            swc_file,
+            shape=(D, H, W),
+            foreground_value=1,
+            r_scale=3.0
+        )
+        img_u8[mask>0] = np.uint8(0)
+
+    swc_merged = merge_swcs(swcs)
+    merged_swc = workdir / "output.swc"
+    swc_merged.save_to_swc(merged_swc)
+
+    return file_response_or_500(merged_swc, filename="output.swc")
+
+
+@app.post("/trace_vaa3d_smartTrace")
+async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
+    check_suffix(file.filename)
+
+    ensure_executable(VAA3D_BIN, name="Vaa3D")
+
+    workdir = make_workdir()
+    local_input = workdir / "vol.tiff"
+    swc_file = workdir / "output.swc"
+    local_log = workdir / "log.txt"
+
+    await save_upload_to(file, local_input)
+
+    # Read & normalize to uint8, then write a temp tiff for Vaa3D
+    img = tiff.imread(local_input)
+    img_u8 = to_uint8_0_255(img)
+
+    tif_file = workdir / "vol_uint8.tiff"
+    tiff.imwrite(tif_file, img_u8)
+
+    if img_u8.ndim != 3:
+        raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
+
+    D, H, W = img_u8.shape  # noqa: F841
+
+    # Iterative tracing settings
+    max_iters = 64                  # hard stop to avoid infinite loops
+    min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
+
+    swcs = []
+    cmd_swc_file = Path(str(tif_file) + "_smartTracing.swc")
+    for it in range(max_iters):
+        tiff.imwrite(tif_file, img_u8)
+        swc_file = workdir / f"output_{it:03d}.swc"
+
+        cmd = [
+            str(VAA3D_BIN),
+            "-x", "smartTrace",
+            "-f", "smartTrace",
+            "-i", str(tif_file),
+        ]
+        await asyncio.sleep(0.1)
+        try:
+            run_cmd(cmd, local_log, workdir)
+        except:
+            if not cmd_swc_file.exists():
+                raise HTTPException(status_code=500, detail="smartTrace failed and no output generated")
+            
+        if not cmd_swc_file.exists():
+            raise HTTPException(status_code=500, detail=f"Expected output not found: {cmd_swc_file}")
+        cmd_swc_file.rename(swc_file)
         postprocess_vaa3d_result(swc_file, maxy=H)
 
         swc = Swc(swc_file)
