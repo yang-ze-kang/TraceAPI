@@ -339,8 +339,11 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
             "0",               # is_brightfield
             "0",               # is_high_intensity
         ]
-        run_cmd(cmd, local_log, workdir)
-        if not out_swc.exists() or out_swc.stat().st_size == 0:
+        try:
+            run_cmd(cmd, local_log, workdir)
+            if not out_swc.exists() or out_swc.stat().st_size == 0:
+                return False
+        except:
             return False
         postprocess_vaa3d_result(out_swc, maxy=H)
         return True

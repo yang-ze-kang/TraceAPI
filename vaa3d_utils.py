@@ -187,7 +187,8 @@ def run_trace_iterative_with_seed_fallback(
     for it in range(max_iters):
         tiff.imwrite(tif_file, img_u8)
         swc_file = workdir / f"output_{it:03d}.swc"
-
+        node_num = 0
+        
         if not seed_mode:
             ok = run_once(swc_file, None)
             swc = Swc(swc_file) if ok else Swc()
@@ -198,28 +199,32 @@ def run_trace_iterative_with_seed_fallback(
                 seed_pool = build_neutube_like_seed_pool(img_u8)
 
         if seed_mode and seed_pool:
-            seed_xyz = seed_pool.pop(0)
-            marker_file = workdir / f"{seed_prefix}_{it:03d}.marker"
-            swc_file = workdir / f"output_{it:03d}_seeded.swc"
-            write_marker_file(marker_file, seed_xyz, D, H, W)
-            ok = run_once(swc_file, marker_file)
-            swc = Swc(swc_file) if ok else Swc()
-            node_num = len(swc.nodes)
+            while len(seed_pool)!=0:
+                seed_xyz = seed_pool.pop(0)
+                marker_file = workdir / f"{seed_prefix}_{it:03d}.marker"
+                swc_file = workdir / f"output_{it:03d}_seeded.swc"
+                write_marker_file(marker_file, seed_xyz, D, H, W)
+                ok = run_once(swc_file, marker_file)
+                swc = Swc(swc_file) if ok else Swc()
+                node_num = len(swc.nodes)
+                if node_num > 0:
+                    break
 
-        if node_num == 0:
+        if node_num==0:
             break
 
         if node_num >= min_nodes_to_accept and swc.length >= 3.0:
             swcs.append(swc)
 
         # Mask traced tree out, then continue.
-        mask = swc_to_mask_sphere_cone(
-            swc_file,
-            shape=(D, H, W),
-            foreground_value=1,
-            r_scale=3.0,
-        )
-        img_u8[mask > 0] = np.uint8(0)
+        if node_num > 0:
+            mask = swc_to_mask_sphere_cone(
+                swc_file,
+                shape=(D, H, W),
+                foreground_value=1,
+                r_scale=3.0,
+            )
+            img_u8[mask > 0] = np.uint8(0)
 
         # Remove candidate seeds already covered by traced region.
         if seed_mode:

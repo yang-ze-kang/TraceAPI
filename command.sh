@@ -43,3 +43,6 @@ curl -X POST "http://127.0.0.1:8000/trace_vaa3d_smartTrace" \
 /gpfs-flash/hulab/yangzekang/neuron/TraceAPI/algorithms/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x -x smartTrace -f smartTrace -i /gpfs-flash/hulab/yangzekang/neuron/TraceAPI/runs/20260429_184601_565/vol_uint8.tiff -p /gpfs-flash/hulab/yangzekang/neuron/TraceAPI/runs/20260429_184601_565/smart_seed_000_000.marker 0 10 0 1 0 0 5 1 0 
 
 
+curl -X POST "http://127.0.0.1:8000/trace_vaa3d_app2" \
+  -F "file=@/gpfs-flash/hulab/yangzekang/neuron/neuron-trace/outputs/C2-cubes1937-iter10000/vnet-dice/2026-04-24-23-39-35/preds/cube300_x10500_y18100_z2800.tif" \
+  --output /gpfs-flash/hulab/yangzekang/neuron/TraceAPI/test_app2_output.swc
