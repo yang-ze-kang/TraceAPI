@@ -297,11 +297,11 @@ def run_trace_iterative_with_noise_mask(
         )
         img_u8[mask > 0] = np.uint8(0)
 
-    if not swcs:
-        raise HTTPException(status_code=422, detail=f"{error_label} failed.")
-
+    if len(swcs) == 0:
+        swc_merged = Swc()
+    else:
+        swc_merged = merge_swcs(swcs)
     merged_swc = workdir / "output.swc"
-    swc_merged = merge_swcs(swcs)
     swc_merged.save_to_swc(merged_swc)
     return merged_swc
 
