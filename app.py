@@ -320,25 +320,6 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
 
     def _run_app2(out_swc: Path, marker_file: Optional[Path] = None) -> bool:
         marker_arg = str(marker_file) if marker_file is not None else "None"
-        # cmd = [
-        #     str(VAA3D_BIN),
-        #     "-x", "vn2",
-        #     "-f", "app2",
-        #     "-i", str(tif_file),
-        #     "-o", str(out_swc),
-        #     "-p",
-        #     marker_arg,        # inmarker_file
-        #     "0",               # channel
-        #     "10",              # bkg_thresh
-        #     "0",               # b_256cube
-        #     "1",               # b_radiusFrom2D
-        #     "0",               # is_gsdt
-        #     "0",               # is_gap
-        #     "5",               # length_thresh
-        #     "1",               # is_resample
-        #     "0",               # is_brightfield
-        #     "0",               # is_high_intensity
-        # ]
         cmd = [
             str(VAA3D_BIN),
             "-x", "vn2",
@@ -364,15 +345,27 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
         postprocess_vaa3d_result(out_swc, maxy=H)
         return True
 
-    merged_swc = run_trace_iterative_with_noise_mask(
+    merged_swc = run_trace_iterative_with_seed_fallback(
         img_u8=img_u8,
         tif_file=tif_file,
         workdir=workdir,
         max_iters=max_iters,
         min_nodes_to_accept=min_nodes_to_accept,
+        max_seed_tries_per_iter=max_seed_tries_per_iter,
         run_once=_run_app2,
+        seed_prefix="app2_seed",
         error_label="APP2",
     )
+
+    # merged_swc = run_trace_iterative_with_noise_mask(
+    #     img_u8=img_u8,
+    #     tif_file=tif_file,
+    #     workdir=workdir,
+    #     max_iters=max_iters,
+    #     min_nodes_to_accept=min_nodes_to_accept,
+    #     run_once=_run_app2,
+    #     error_label="APP2",
+    # )
 
     return file_response_or_500(merged_swc, filename="output.swc")
 
@@ -394,8 +387,11 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
             "-f", "smartTrace",
             "-i", str(tif_file),
         ]
-        run_cmd(cmd, local_log, workdir)
-        if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
+        try:
+            run_cmd(cmd, local_log, workdir)
+            if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
+                return False
+        except HTTPException as e:
             return False
         cmd_swc_file.rename(out_swc)
         postprocess_vaa3d_result(out_swc, maxy=H)

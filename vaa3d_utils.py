@@ -138,12 +138,7 @@ def denoise_foreground_components_inplace(img_u8: np.ndarray) -> bool:
     Remove tiny compact connected components from non-zero foreground in-place.
     Return True if denoising is applied successfully.
     """
-    th = img_u8[img_u8 > 0]
-    th = float(np.percentile(th, 85.0))
-    th = max(th, 2.0)
-    fg = img_u8 >= th
-    if np.count_nonzero(fg) == 0:
-        fg = img_u8 > 0
+    fg = img_u8 > 0
 
     lbl, num = ndi.label(fg)
     if num <= 0:
@@ -186,38 +181,36 @@ def run_trace_iterative_with_seed_fallback(
     error_label: str,
 ) -> Path:
     D, H, W = img_u8.shape
-    seed_pool = build_neutube_like_seed_pool(img_u8)
     swcs: List[Swc] = []
 
+    seed_mode = False
     for it in range(max_iters):
         tiff.imwrite(tif_file, img_u8)
         swc_file = workdir / f"output_{it:03d}.swc"
 
-        ok = run_once(swc_file, None)
-        swc = Swc(swc_file) if ok else Swc()
-        node_num = len(swc.nodes)
+        if not seed_mode:
+            ok = run_once(swc_file, None)
+            swc = Swc(swc_file) if ok else Swc()
+            node_num = len(swc.nodes)
 
-        # Auto-run failed -> try candidate seeds one by one.
-        if node_num == 0 and seed_pool:
-            tries = min(len(seed_pool), max_seed_tries_per_iter)
-            for seed_idx in range(tries):
-                seed_xyz = seed_pool.pop(0)
-                marker_file = workdir / f"{seed_prefix}_{it:03d}_{seed_idx:03d}.marker"
-                seeded_swc_file = workdir / f"output_{it:03d}_seeded_{seed_idx:03d}.swc"
-                write_marker_file(marker_file, seed_xyz, D, H, W)
-                ok = run_once(seeded_swc_file, marker_file)
-                if not ok:
-                    continue
-                swc_try = Swc(seeded_swc_file)
-                if len(swc_try.nodes) >= min_nodes_to_accept:
-                    swc = swc_try
-                    swc_file = seeded_swc_file
-                    node_num = len(swc.nodes)
-                    break
+            if node_num == 0 and int(np.count_nonzero(img_u8 > 0)) > 20:
+                seed_mode = True
+                seed_pool = build_neutube_like_seed_pool(img_u8)
 
-        if node_num < min_nodes_to_accept:
+        if seed_mode and seed_pool:
+            seed_xyz = seed_pool.pop(0)
+            marker_file = workdir / f"{seed_prefix}_{it:03d}.marker"
+            swc_file = workdir / f"output_{it:03d}_seeded.swc"
+            write_marker_file(marker_file, seed_xyz, D, H, W)
+            ok = run_once(swc_file, marker_file)
+            swc = Swc(swc_file) if ok else Swc()
+            node_num = len(swc.nodes)
+
+        if node_num == 0:
             break
-        swcs.append(swc)
+
+        if node_num >= min_nodes_to_accept and swc.length >= 3.0:
+            swcs.append(swc)
 
         # Mask traced tree out, then continue.
         mask = swc_to_mask_sphere_cone(
@@ -229,15 +222,16 @@ def run_trace_iterative_with_seed_fallback(
         img_u8[mask > 0] = np.uint8(0)
 
         # Remove candidate seeds already covered by traced region.
-        kept = []
-        for x, y, z in seed_pool:
-            xi = int(round(x))
-            yi = int(round(y))
-            zi = int(round(z))
-            if 0 <= zi < D and 0 <= yi < H and 0 <= xi < W and mask[zi, yi, xi] > 0:
-                continue
-            kept.append((x, y, z))
-        seed_pool = kept
+        if seed_mode:
+            kept = []
+            for x, y, z in seed_pool:
+                xi = int(round(x))
+                yi = int(round(y))
+                zi = int(round(z))
+                if 0 <= zi < D and 0 <= yi < H and 0 <= xi < W and mask[zi, yi, xi] > 0:
+                    continue
+                kept.append((x, y, z))
+            seed_pool = kept
 
     if not swcs:
         raise HTTPException(status_code=422, detail=f"{error_label} failed for auto and candidate seeds.")
@@ -261,6 +255,7 @@ def run_trace_iterative_with_noise_mask(
     D, H, W = img_u8.shape
     swcs: List[Swc] = []
 
+    denoise_flag = False
     for it in range(max_iters):
         tiff.imwrite(tif_file, img_u8)
         swc_file = workdir / f"output_{it:03d}.swc"
@@ -270,8 +265,10 @@ def run_trace_iterative_with_noise_mask(
         node_num = len(swc.nodes)
 
         # If still no trace but foreground is non-trivial, denoise and retry next iteration.
-        if node_num == 0 and int(np.count_nonzero(img_u8 > 0)) > 10:
-            if denoise_foreground_components_inplace(img_u8):
+        if node_num == 0:
+            if not denoise_flag and int(np.count_nonzero(img_u8 > 0)) > 10:
+                denoise_flag=True
+                denoise_foreground_components_inplace(img_u8)
                 print(f"Iteration {it}: Denoised foreground components, retrying.")
                 tiff.imwrite(tif_file, img_u8)
                 ok = run_once(swc_file)
@@ -283,7 +280,7 @@ def run_trace_iterative_with_noise_mask(
         if node_num == 0:
             break
 
-        if node_num >= min_nodes_to_accept:
+        if node_num >= min_nodes_to_accept and swc.length > 3.0:
             swcs.append(swc)
 
         # Mask traced tree out, then continue.
