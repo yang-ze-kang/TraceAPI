@@ -394,7 +394,7 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
             run_cmd(cmd, local_log, workdir)
             if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
                 return False
-        except HTTPException as e:
+        except:
             return False
         cmd_swc_file.rename(out_swc)
         postprocess_vaa3d_result(out_swc, maxy=H)
