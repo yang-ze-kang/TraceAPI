@@ -7,16 +7,13 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Awaitable, Callable, Iterable, List, Optional
 import tifffile as tiff
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 import asyncio
 import shutil
 from datetime import datetime
-
-from swclib.data.swc import Swc, merge_swcs
-from swclib.image.swc2mask import swc_to_mask_sphere_cone
 
 from vaa3d_utils import *
 
@@ -144,6 +141,27 @@ def file_response_or_500(path: Path, filename: str = "output.swc") -> FileRespon
     )
 
 
+async def prepare_trace_volume(file: UploadFile) -> tuple[Path, Path, Path, np.ndarray, int]:
+    """Common preprocessing for tracing routes."""
+    check_suffix(file.filename)
+    ensure_executable(VAA3D_BIN, name="Vaa3D")
+
+    workdir = make_workdir()
+    local_input = workdir / "vol.tiff"
+    local_log = workdir / "log.txt"
+    await save_upload_to(file, local_input)
+
+    img = tiff.imread(local_input)
+    img_u8 = to_uint8_0_255(img)
+    if img_u8.ndim != 3:
+        raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
+
+    _, H, _ = img_u8.shape
+    tif_file = workdir / "vol_uint8.tiff"
+    tiff.imwrite(tif_file, img_u8)
+    return workdir, local_input, local_log, img_u8, H
+
+
 # -----------------------------
 # Routes
 # -----------------------------
@@ -223,146 +241,175 @@ async def trace_neutube(file: UploadFile = File(...)):
 
 #     return file_response_or_500(swc_file, filename="output.swc")
 
+# @app.post("/trace_vaa3d_app2")
+# async def trace_vaa3d_app2_v1(file: UploadFile = File(...)):
+#     check_suffix(file.filename)
+
+#     ensure_executable(VAA3D_BIN, name="Vaa3D")
+
+#     workdir = make_workdir()
+#     local_input = workdir / "vol.tiff"
+#     swc_file = workdir / "output.swc"
+#     local_log = workdir / "log.txt"
+
+#     await save_upload_to(file, local_input)
+
+#     # Read & normalize to uint8, then write a temp tiff for Vaa3D
+#     img = tiff.imread(local_input)
+#     img_u8 = to_uint8_0_255(img)
+
+#     tif_file = workdir / "vol_uint8.tiff"
+#     tiff.imwrite(tif_file, img_u8)
+
+#     if img_u8.ndim != 3:
+#         raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
+
+#     D, H, W = img_u8.shape  # noqa: F841
+
+#     # Iterative tracing settings
+#     max_iters = 64                  # hard stop to avoid infinite loops
+#     min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
+
+#     swcs = []
+#     for it in range(max_iters):
+#         tiff.imwrite(tif_file, img_u8)
+
+#         swc_file = workdir / f"output_{it:03d}.swc"
+
+#         cmd = [
+#             str(VAA3D_BIN),
+#             "-x", "vn2",
+#             "-f", "app2",
+#             "-i", str(tif_file),
+#             "-o", str(swc_file),
+#         ]
+#         run_cmd(cmd, local_log, workdir)
+#         postprocess_vaa3d_result(swc_file, maxy=H)
+
+#         swc = Swc(swc_file)
+
+#         # Stop criteria: empty / no valid nodes / too few nodes
+#         if (len(swc.nodes) < min_nodes_to_accept):
+#             break
+#         swcs.append(swc)
+
+#         # Mask this traced tree out of the volume, then continue
+#         mask = swc_to_mask_sphere_cone(
+#             swc_file,
+#             shape=(D, H, W),
+#             foreground_value=1,
+#             r_scale=3.0
+#         )
+#         img_u8[mask>0] = np.uint8(0)
+
+#     swc_merged = merge_swcs(swcs)
+#     merged_swc = workdir / "output.swc"
+#     swc_merged.save_to_swc(merged_swc)
+
+#     return file_response_or_500(merged_swc, filename="output.swc")
+
 @app.post("/trace_vaa3d_app2")
 async def trace_vaa3d_app2(file: UploadFile = File(...)):
-    check_suffix(file.filename)
-
-    ensure_executable(VAA3D_BIN, name="Vaa3D")
-
-    workdir = make_workdir()
-    local_input = workdir / "vol.tiff"
-    swc_file = workdir / "output.swc"
-    local_log = workdir / "log.txt"
-
-    await save_upload_to(file, local_input)
-
-    # Read & normalize to uint8, then write a temp tiff for Vaa3D
-    img = tiff.imread(local_input)
-    img_u8 = to_uint8_0_255(img)
-
+    workdir, _, local_log, img_u8, H = await prepare_trace_volume(file)
     tif_file = workdir / "vol_uint8.tiff"
-    tiff.imwrite(tif_file, img_u8)
-
-    if img_u8.ndim != 3:
-        raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
-
-    D, H, W = img_u8.shape  # noqa: F841
 
     # Iterative tracing settings
     max_iters = 64                  # hard stop to avoid infinite loops
     min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
+    max_seed_tries_per_iter = 32
 
-    swcs = []
-    for it in range(max_iters):
-        tiff.imwrite(tif_file, img_u8)
-
-        swc_file = workdir / f"output_{it:03d}.swc"
-
+    def _run_app2(out_swc: Path, marker_file: Optional[Path] = None) -> bool:
+        marker_arg = str(marker_file) if marker_file is not None else "None"
+        # cmd = [
+        #     str(VAA3D_BIN),
+        #     "-x", "vn2",
+        #     "-f", "app2",
+        #     "-i", str(tif_file),
+        #     "-o", str(out_swc),
+        #     "-p",
+        #     marker_arg,        # inmarker_file
+        #     "0",               # channel
+        #     "10",              # bkg_thresh
+        #     "0",               # b_256cube
+        #     "1",               # b_radiusFrom2D
+        #     "0",               # is_gsdt
+        #     "0",               # is_gap
+        #     "5",               # length_thresh
+        #     "1",               # is_resample
+        #     "0",               # is_brightfield
+        #     "0",               # is_high_intensity
+        # ]
         cmd = [
             str(VAA3D_BIN),
             "-x", "vn2",
             "-f", "app2",
             "-i", str(tif_file),
-            "-o", str(swc_file),
+            "-o", str(out_swc),
+            "-p",
+            marker_arg,        # inmarker_file
+            "0",               # channel
+            "10",              # bkg_thresh
+            "0",               # b_256cube
+            "1",               # b_radiusFrom2D
+            "0",               # is_gsdt
+            "0",               # is_gap
+            "5",               # length_thresh
+            "1",               # is_resample
+            "0",               # is_brightfield
+            "0",               # is_high_intensity
         ]
         run_cmd(cmd, local_log, workdir)
-        postprocess_vaa3d_result(swc_file, maxy=H)
+        if not out_swc.exists() or out_swc.stat().st_size == 0:
+            return False
+        postprocess_vaa3d_result(out_swc, maxy=H)
+        return True
 
-        swc = Swc(swc_file)
-
-        # Stop criteria: empty / no valid nodes / too few nodes
-        if (len(swc.nodes) < min_nodes_to_accept):
-            break
-        swcs.append(swc)
-
-        # Mask this traced tree out of the volume, then continue
-        mask = swc_to_mask_sphere_cone(
-            swc_file,
-            shape=(D, H, W),
-            foreground_value=1,
-            r_scale=3.0
-        )
-        img_u8[mask>0] = np.uint8(0)
-
-    swc_merged = merge_swcs(swcs)
-    merged_swc = workdir / "output.swc"
-    swc_merged.save_to_swc(merged_swc)
+    merged_swc = run_trace_iterative_with_noise_mask(
+        img_u8=img_u8,
+        tif_file=tif_file,
+        workdir=workdir,
+        max_iters=max_iters,
+        min_nodes_to_accept=min_nodes_to_accept,
+        run_once=_run_app2,
+        error_label="APP2",
+    )
 
     return file_response_or_500(merged_swc, filename="output.swc")
 
 
 @app.post("/trace_vaa3d_smartTrace")
 async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
-    check_suffix(file.filename)
-
-    ensure_executable(VAA3D_BIN, name="Vaa3D")
-
-    workdir = make_workdir()
-    local_input = workdir / "vol.tiff"
-    swc_file = workdir / "output.swc"
-    local_log = workdir / "log.txt"
-
-    await save_upload_to(file, local_input)
-
-    # Read & normalize to uint8, then write a temp tiff for Vaa3D
-    img = tiff.imread(local_input)
-    img_u8 = to_uint8_0_255(img)
-
+    workdir, _, local_log, img_u8, H = await prepare_trace_volume(file)
     tif_file = workdir / "vol_uint8.tiff"
-    tiff.imwrite(tif_file, img_u8)
-
-    if img_u8.ndim != 3:
-        raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
-
-    D, H, W = img_u8.shape  # noqa: F841
 
     # Iterative tracing settings
     max_iters = 64                  # hard stop to avoid infinite loops
     min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
-
-    swcs = []
     cmd_swc_file = Path(str(tif_file) + "_smartTracing.swc")
-    for it in range(max_iters):
-        tiff.imwrite(tif_file, img_u8)
-        swc_file = workdir / f"output_{it:03d}.swc"
 
+    def _run_smarttrace(out_swc: Path, marker_file: Optional[Path] = None) -> bool:
         cmd = [
             str(VAA3D_BIN),
             "-x", "smartTrace",
             "-f", "smartTrace",
             "-i", str(tif_file),
         ]
-        await asyncio.sleep(0.1)
-        try:
-            run_cmd(cmd, local_log, workdir)
-        except:
-            if not cmd_swc_file.exists():
-                raise HTTPException(status_code=500, detail="smartTrace failed and no output generated")
-            
-        if not cmd_swc_file.exists():
-            raise HTTPException(status_code=500, detail=f"Expected output not found: {cmd_swc_file}")
-        cmd_swc_file.rename(swc_file)
-        postprocess_vaa3d_result(swc_file, maxy=H)
+        run_cmd(cmd, local_log, workdir)
+        if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
+            return False
+        cmd_swc_file.rename(out_swc)
+        postprocess_vaa3d_result(out_swc, maxy=H)
+        return True
 
-        swc = Swc(swc_file)
-
-        # Stop criteria: empty / no valid nodes / too few nodes
-        if (len(swc.nodes) < min_nodes_to_accept):
-            break
-        swcs.append(swc)
-
-        # Mask this traced tree out of the volume, then continue
-        mask = swc_to_mask_sphere_cone(
-            swc_file,
-            shape=(D, H, W),
-            foreground_value=1,
-            r_scale=3.0
-        )
-        img_u8[mask>0] = np.uint8(0)
-
-    swc_merged = merge_swcs(swcs)
-    merged_swc = workdir / "output.swc"
-    swc_merged.save_to_swc(merged_swc)
+    merged_swc = run_trace_iterative_with_noise_mask(
+        img_u8=img_u8,
+        tif_file=tif_file,
+        workdir=workdir,
+        max_iters=max_iters,
+        min_nodes_to_accept=min_nodes_to_accept,
+        run_once=_run_smarttrace,
+        error_label="smartTrace",
+    )
 
     return file_response_or_500(merged_swc, filename="output.swc")
 
