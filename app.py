@@ -119,7 +119,8 @@ def run_cmd(cmd: List[str], log_path: Path, workdir: Path, timeout_sec: int = 36
                 timeout=timeout_sec,
             )
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Command timed out")
+        # raise HTTPException(status_code=504, detail="Command timed out")
+        return False
     except subprocess.CalledProcessError as e:
         # if e.returncode == -signal.SIGSEGV and "smartTrace" in cmd:
         #     # caused by smartTrace
@@ -129,6 +130,7 @@ def run_cmd(cmd: List[str], log_path: Path, workdir: Path, timeout_sec: int = 36
         except Exception:
             text = "(failed to read log)"
         raise HTTPException(status_code=500, detail=f"Command failed. Tail log:\n{text}")
+    return True
 
 
 def file_response_or_500(path: Path, filename: str = "output.swc") -> FileResponse:
@@ -379,7 +381,7 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
     tif_file = workdir / "vol_uint8.tiff"
 
     # Iterative tracing settings
-    max_iters = 64                  # hard stop to avoid infinite loops
+    max_iters = 16                  # hard stop to avoid infinite loops
     min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
     cmd_swc_file = Path(str(tif_file) + "_smartTracing.swc")
 
@@ -391,7 +393,10 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
             "-i", str(tif_file),
         ]
         try:
-            run_cmd(cmd, local_log, workdir)
+            ok = run_cmd(cmd, local_log, workdir)
+            if not ok:
+                swc = Swc()
+                swc.save_to_swc(cmd_swc_file)
             if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
                 return False
         except:
