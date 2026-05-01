@@ -42,7 +42,7 @@ def ensure_executable(path: Path, name: str = "binary") -> None:
         raise HTTPException(status_code=500, detail=f"{name} not executable: {path}")
 
 
-def cleanup_runs_worker(interval_hours: int = 2, max_age_hours: int = 24) -> None:
+def cleanup_runs_worker(interval_hours: int = 0.5, max_age_hours: int = 1) -> None:
     """Periodically delete old run directories under RUNS_DIR."""
     while True:
         now = time.time()
@@ -54,7 +54,7 @@ def cleanup_runs_worker(interval_hours: int = 2, max_age_hours: int = 24) -> Non
                 if age_hours > max_age_hours:
                     print(f"[cleanup] removing {d} (age={age_hours:.2f}h)")
                     shutil.rmtree(d, ignore_errors=True)
-        time.sleep(interval_hours * 3600)
+        time.sleep(int(interval_hours * 3600))
 
 
 @asynccontextmanager

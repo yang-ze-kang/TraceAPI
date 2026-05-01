@@ -199,7 +199,9 @@ def run_trace_iterative_with_seed_fallback(
                 seed_pool = build_neutube_like_seed_pool(img_u8)
 
         if seed_mode and seed_pool:
-            while len(seed_pool)!=0:
+            seed_iter = 0
+            while len(seed_pool)!=0 and seed_iter < 10:
+                seed_iter += 1
                 seed_xyz = seed_pool.pop(0)
                 marker_file = workdir / f"{seed_prefix}_{it:03d}.marker"
                 swc_file = workdir / f"output_{it:03d}_seeded.swc"
