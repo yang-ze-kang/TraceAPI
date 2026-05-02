@@ -393,7 +393,7 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
             "-i", str(tif_file),
         ]
         try:
-            ok = run_cmd(cmd, local_log, workdir)
+            ok = run_cmd(cmd, local_log, workdir, 2400)
             if not ok:
                 swc = Swc()
                 swc.save_to_swc(cmd_swc_file)
