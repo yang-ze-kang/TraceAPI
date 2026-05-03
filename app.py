@@ -397,6 +397,7 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
             if not ok:
                 swc = Swc()
                 swc.save_to_swc(cmd_swc_file)
+                return False
             if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
                 return False
         except:
