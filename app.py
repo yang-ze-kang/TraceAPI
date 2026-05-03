@@ -167,9 +167,9 @@ async def prepare_trace_volume(file: UploadFile) -> tuple[Path, Path, Path, np.n
 # -----------------------------
 # Routes
 # -----------------------------
-@app.get("/hello")
-def hello():
-    return {"ok": True}
+# @app.get("/hello")
+# def hello():
+#     return {"ok": True}
 
 
 @app.post("/trace_neutube")
@@ -397,6 +397,7 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
             if not ok:
                 swc = Swc()
                 swc.save_to_swc(cmd_swc_file)
+                return False
             if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
                 return False
         except:
@@ -418,6 +419,6 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
     return file_response_or_500(merged_swc, filename="output.swc")
 
 
-@app.post("/trace_kimimacro")
-async def trace_kimimacro(file: UploadFile = File(...)):
-    raise HTTPException(status_code=501, detail="Not implemented")
+# @app.post("/trace_kimimacro")
+# async def trace_kimimacro(file: UploadFile = File(...)):
+#     raise HTTPException(status_code=501, detail="Not implemented")
