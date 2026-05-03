@@ -284,7 +284,7 @@ def run_trace_iterative_with_noise_mask(
             else:
                 break
         
-        if node_num == 0:
+        if node_num == 0 or not ok:
             break
 
         if node_num >= min_nodes_to_accept and swc.length > 3.0:
