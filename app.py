@@ -167,11 +167,6 @@ async def prepare_trace_volume(file: UploadFile) -> tuple[Path, Path, Path, np.n
 # -----------------------------
 # Routes
 # -----------------------------
-# @app.get("/hello")
-# def hello():
-#     return {"ok": True}
-
-
 @app.post("/trace_neutube")
 async def trace_neutube(file: UploadFile = File(...)):
     check_suffix(file.filename)
@@ -199,116 +194,6 @@ async def trace_neutube(file: UploadFile = File(...)):
 
     return file_response_or_500(local_output, filename="output.swc")
 
-
-# @app.post("/trace_vaa3d_app2")
-# async def trace_vaa3d_app2(file: UploadFile = File(...)):
-#     check_suffix(file.filename)
-
-#     ensure_executable(VAA3D_BIN, name="Vaa3D")
-
-#     workdir = make_workdir()
-#     local_input = workdir / "vol.tiff"
-#     swc_file = workdir / "output.swc"
-#     local_log = workdir / "log.txt"
-
-#     await save_upload_to(file, local_input)
-
-#     # Read & normalize to uint8, then write a temp tiff for Vaa3D
-#     img = tiff.imread(local_input)
-#     img_u8 = to_uint8_0_255(img)
-
-#     tif_file = workdir / "vol_uint8.tiff"
-#     tiff.imwrite(tif_file, img_u8)
-
-#     if img_u8.ndim != 3:
-#         raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
-
-#     D, H, W = img_u8.shape  # noqa: F841
-
-#     cmd = [
-#         str(VAA3D_BIN),
-#         "-x",
-#         "vn2",
-#         "-f",
-#         "app2",
-#         "-i",
-#         str(tif_file),
-#         "-o",
-#         str(swc_file),
-#     ]
-#     run_cmd(cmd, local_log, workdir)
-
-#     # Post-process Vaa3D SWC (your util expects maxy=H)
-#     postprocess_vaa3d_result(swc_file, maxy=H)
-
-#     return file_response_or_500(swc_file, filename="output.swc")
-
-# @app.post("/trace_vaa3d_app2")
-# async def trace_vaa3d_app2_v1(file: UploadFile = File(...)):
-#     check_suffix(file.filename)
-
-#     ensure_executable(VAA3D_BIN, name="Vaa3D")
-
-#     workdir = make_workdir()
-#     local_input = workdir / "vol.tiff"
-#     swc_file = workdir / "output.swc"
-#     local_log = workdir / "log.txt"
-
-#     await save_upload_to(file, local_input)
-
-#     # Read & normalize to uint8, then write a temp tiff for Vaa3D
-#     img = tiff.imread(local_input)
-#     img_u8 = to_uint8_0_255(img)
-
-#     tif_file = workdir / "vol_uint8.tiff"
-#     tiff.imwrite(tif_file, img_u8)
-
-#     if img_u8.ndim != 3:
-#         raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
-
-#     D, H, W = img_u8.shape  # noqa: F841
-
-#     # Iterative tracing settings
-#     max_iters = 64                  # hard stop to avoid infinite loops
-#     min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
-
-#     swcs = []
-#     for it in range(max_iters):
-#         tiff.imwrite(tif_file, img_u8)
-
-#         swc_file = workdir / f"output_{it:03d}.swc"
-
-#         cmd = [
-#             str(VAA3D_BIN),
-#             "-x", "vn2",
-#             "-f", "app2",
-#             "-i", str(tif_file),
-#             "-o", str(swc_file),
-#         ]
-#         run_cmd(cmd, local_log, workdir)
-#         postprocess_vaa3d_result(swc_file, maxy=H)
-
-#         swc = Swc(swc_file)
-
-#         # Stop criteria: empty / no valid nodes / too few nodes
-#         if (len(swc.nodes) < min_nodes_to_accept):
-#             break
-#         swcs.append(swc)
-
-#         # Mask this traced tree out of the volume, then continue
-#         mask = swc_to_mask_sphere_cone(
-#             swc_file,
-#             shape=(D, H, W),
-#             foreground_value=1,
-#             r_scale=3.0
-#         )
-#         img_u8[mask>0] = np.uint8(0)
-
-#     swc_merged = merge_swcs(swcs)
-#     merged_swc = workdir / "output.swc"
-#     swc_merged.save_to_swc(merged_swc)
-
-#     return file_response_or_500(merged_swc, filename="output.swc")
 
 @app.post("/trace_vaa3d_app2")
 async def trace_vaa3d_app2(file: UploadFile = File(...)):

@@ -8,6 +8,11 @@ sudo apt-get install -y libqt5widgets5 libqt5gui5 libqt5xml5 libqt5network5 libq
 sudo apt-get install -y libqt5concurrent5
 
 
+export LD_LIBRARY_PATH=/gpfs-flash/hulab/yangzekang/miniconda/envs/py39/lib:$LD_LIBRARY_PATH
+
+export LD_LIBRARY_PATH=/gpfs-flash/hulab/yangzekang/neuron/TraceAPI/algorithms:$LD_LIBRARY_PATH
+
+
 /gpfs-flash/hulab/yangzekang/neuron/TraceAPI/algorithms/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x \
     -x vn2 -f app2 \
     -i /gpfs-flash/hulab/yangzekang/neuron/neuron-trace/outputs/C2-cubes1937-iter10000/dynunet-cldice-iter3/2026-04-25-07-33-40/preds/cube300_x4500_y15700_z3700.tif \
