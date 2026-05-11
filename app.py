@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import signal
 import shutil
 import subprocess
 import threading
@@ -107,29 +108,38 @@ def check_suffix(filename: str) -> None:
 
 def run_cmd(cmd: List[str], log_path: Path, workdir: Path, timeout_sec: int = 3600) -> None:
     """Run a command, writing stdout+stderr to log_path."""
+    proc = None
     try:
         with log_path.open("wb") as logf:
             print("[run]", " ".join(cmd))
-            subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
                 stdout=logf,
                 stderr=subprocess.STDOUT,
                 cwd=str(workdir),
-                check=True,
-                timeout=timeout_sec,
+                start_new_session=True,
             )
+            try:
+                proc.wait(timeout=timeout_sec)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                return False
+
+            if proc.returncode != 0:
+                try:
+                    text = log_path.read_text(errors="ignore")[-5000:]
+                except Exception:
+                    text = "(failed to read log)"
+                raise HTTPException(status_code=500, detail=f"Command failed. Tail log:\n{text}")
     except subprocess.TimeoutExpired:
         # raise HTTPException(status_code=504, detail="Command timed out")
         return False
-    except subprocess.CalledProcessError as e:
-        # if e.returncode == -signal.SIGSEGV and "smartTrace" in cmd:
-        #     # caused by smartTrace
-        #     return False
-        try:
-            text = log_path.read_text(errors="ignore")[-5000:]
-        except Exception:
-            text = "(failed to read log)"
-        raise HTTPException(status_code=500, detail=f"Command failed. Tail log:\n{text}")
+    except BaseException:
+        if proc is not None and proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+        raise
     return True
 
 
@@ -201,11 +211,12 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
     tif_file = workdir / "vol_uint8.tiff"
 
     # Iterative tracing settings
-    max_iters = 64                  # hard stop to avoid infinite loops
+    max_iters = 32                  # hard stop to avoid infinite loops
+    timeout_sec = 3000              # total time budget for the iterative loop
     min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
-    max_seed_tries_per_iter = 32
+    max_seed_tries_per_iter = 8
 
-    def _run_app2(out_swc: Path, marker_file: Optional[Path] = None) -> bool:
+    def _run_app2(out_swc: Path, marker_file: Optional[Path] = None, timeout_sec: int = 3600) -> bool:
         marker_arg = str(marker_file) if marker_file is not None else "None"
         cmd = [
             str(VAA3D_BIN),
@@ -227,9 +238,11 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
             "0",               # is_high_intensity
         ]
         try:
-            run_cmd(cmd, local_log, workdir)
+            run_cmd(cmd, local_log, workdir, timeout_sec)
             if not out_swc.exists() or out_swc.stat().st_size == 0:
                 return False
+        except TraceTimeoutError:
+            raise
         except:
             return False
         postprocess_vaa3d_result(out_swc, maxy=H)
@@ -240,6 +253,7 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
         tif_file=tif_file,
         workdir=workdir,
         max_iters=max_iters,
+        timeout_sec=timeout_sec,
         min_nodes_to_accept=min_nodes_to_accept,
         max_seed_tries_per_iter=max_seed_tries_per_iter,
         run_once=_run_app2,
@@ -267,10 +281,11 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
 
     # Iterative tracing settings
     max_iters = 16                  # hard stop to avoid infinite loops
+    timeout_sec = 3000              # total time budget for the iterative loop
     min_nodes_to_accept = 3         # too tiny outputs are often noise; tune as needed
     cmd_swc_file = Path(str(tif_file) + "_smartTracing.swc")
 
-    def _run_smarttrace(out_swc: Path, marker_file: Optional[Path] = None) -> bool:
+    def _run_smarttrace(out_swc: Path, marker_file: Optional[Path] = None, timeout_sec: int = 2400) -> bool:
         cmd = [
             str(VAA3D_BIN),
             "-x", "smartTrace",
@@ -278,13 +293,15 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
             "-i", str(tif_file),
         ]
         try:
-            ok = run_cmd(cmd, local_log, workdir, 2400)
+            ok = run_cmd(cmd, local_log, workdir, timeout_sec)
             if not ok:
                 swc = Swc()
                 swc.save_to_swc(cmd_swc_file)
                 return False
             if not cmd_swc_file.exists() or cmd_swc_file.stat().st_size == 0:
                 return False
+        except TraceTimeoutError:
+            raise
         except:
             return False
         cmd_swc_file.rename(out_swc)
@@ -296,6 +313,7 @@ async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
         tif_file=tif_file,
         workdir=workdir,
         max_iters=max_iters,
+        timeout_sec=timeout_sec,
         min_nodes_to_accept=min_nodes_to_accept,
         run_once=_run_smarttrace,
         error_label="smartTrace",
