@@ -1,6 +1,10 @@
 import numpy as np
 import subprocess
 import tifffile as tiff
+import time
+import signal
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, List, Optional, Callable
 from fastapi import HTTPException
@@ -9,6 +13,33 @@ import scipy.ndimage as ndi
 from swclib.data.swc import Swc, merge_swcs
 from swclib.image.swc2mask import swc_to_mask_sphere_cone
 
+
+class TraceTimeoutError(TimeoutError):
+    pass
+
+
+@contextmanager
+def timeout(timeout_sec: int):
+    deadline = time.monotonic() + timeout_sec
+
+    def remaining_timeout() -> int:
+        return max(1, int(deadline - time.monotonic()))
+
+    if threading.current_thread() is not threading.main_thread():
+        yield remaining_timeout
+        return
+
+    def handle_timeout(signum, frame):
+        raise TraceTimeoutError(f"iterative tracing reached timeout_sec={timeout_sec}")
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, handle_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_sec)
+    try:
+        yield remaining_timeout
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def to_uint8_0_255(arr: np.ndarray) -> np.ndarray:
@@ -174,9 +205,10 @@ def run_trace_iterative_with_seed_fallback(
     tif_file: Path,
     workdir: Path,
     max_iters: int,
+    timeout_sec: int,
     min_nodes_to_accept: int,
     max_seed_tries_per_iter: int,
-    run_once: Callable[[Path, Optional[Path]], bool],
+    run_once: Callable[[Path, Optional[Path], int], bool],
     seed_prefix: str,
     error_label: str,
 ) -> Path:
@@ -184,61 +216,65 @@ def run_trace_iterative_with_seed_fallback(
     swcs: List[Swc] = []
 
     seed_mode = False
-    for it in range(max_iters):
-        tiff.imwrite(tif_file, img_u8)
-        swc_file = workdir / f"output_{it:03d}.swc"
-        node_num = 0
-        
-        if not seed_mode:
-            ok = run_once(swc_file, None)
-            swc = Swc(swc_file) if ok else Swc()
-            node_num = len(swc.nodes)
+    try:
+        with timeout(timeout_sec) as remaining_timeout:
+            for it in range(max_iters):
+                tiff.imwrite(tif_file, img_u8)
+                swc_file = workdir / f"output_{it:03d}.swc"
+                node_num = 0
 
-            if node_num == 0 and int(np.count_nonzero(img_u8 > 0)) > 20:
-                seed_mode = True
-                seed_pool = build_neutube_like_seed_pool(img_u8)
+                if not seed_mode:
+                    ok = run_once(swc_file, None, remaining_timeout())
+                    swc = Swc(swc_file) if ok else Swc()
+                    node_num = len(swc.nodes)
 
-        if seed_mode and seed_pool:
-            seed_iter = 0
-            while len(seed_pool)!=0 and seed_iter < 10:
-                seed_iter += 1
-                seed_xyz = seed_pool.pop(0)
-                marker_file = workdir / f"{seed_prefix}_{it:03d}.marker"
-                swc_file = workdir / f"output_{it:03d}_seeded.swc"
-                write_marker_file(marker_file, seed_xyz, D, H, W)
-                ok = run_once(swc_file, marker_file)
-                swc = Swc(swc_file) if ok else Swc()
-                node_num = len(swc.nodes)
-                if node_num > 0:
+                    if node_num == 0 and int(np.count_nonzero(img_u8 > 0)) > 20:
+                        seed_mode = True
+                        seed_pool = build_neutube_like_seed_pool(img_u8)
+
+                if seed_mode and seed_pool:
+                    seed_iter = 0
+                    while len(seed_pool)!=0 and seed_iter < max_seed_tries_per_iter:
+                        seed_iter += 1
+                        seed_xyz = seed_pool.pop(0)
+                        marker_file = workdir / f"{seed_prefix}_{it:03d}.marker"
+                        swc_file = workdir / f"output_{it:03d}_seeded.swc"
+                        write_marker_file(marker_file, seed_xyz, D, H, W)
+                        ok = run_once(swc_file, marker_file, remaining_timeout())
+                        swc = Swc(swc_file) if ok else Swc()
+                        node_num = len(swc.nodes)
+                        if node_num > 0:
+                            break
+
+                if node_num==0:
                     break
 
-        if node_num==0:
-            break
+                if node_num >= min_nodes_to_accept and swc.length >= 3.0:
+                    swcs.append(swc)
 
-        if node_num >= min_nodes_to_accept and swc.length >= 3.0:
-            swcs.append(swc)
+                # Mask traced tree out, then continue.
+                if node_num > 0:
+                    mask = swc_to_mask_sphere_cone(
+                        swc_file,
+                        shape=(D, H, W),
+                        foreground_value=1,
+                        r_scale=3.0,
+                    )
+                    img_u8[mask > 0] = np.uint8(0)
 
-        # Mask traced tree out, then continue.
-        if node_num > 0:
-            mask = swc_to_mask_sphere_cone(
-                swc_file,
-                shape=(D, H, W),
-                foreground_value=1,
-                r_scale=3.0,
-            )
-            img_u8[mask > 0] = np.uint8(0)
-
-        # Remove candidate seeds already covered by traced region.
-        if seed_mode:
-            kept = []
-            for x, y, z in seed_pool:
-                xi = int(round(x))
-                yi = int(round(y))
-                zi = int(round(z))
-                if 0 <= zi < D and 0 <= yi < H and 0 <= xi < W and mask[zi, yi, xi] > 0:
-                    continue
-                kept.append((x, y, z))
-            seed_pool = kept
+                # Remove candidate seeds already covered by traced region.
+                if seed_mode:
+                    kept = []
+                    for x, y, z in seed_pool:
+                        xi = int(round(x))
+                        yi = int(round(y))
+                        zi = int(round(z))
+                        if 0 <= zi < D and 0 <= yi < H and 0 <= xi < W and mask[zi, yi, xi] > 0:
+                            continue
+                        kept.append((x, y, z))
+                    seed_pool = kept
+    except TraceTimeoutError:
+        print(f"{error_label}: iterative tracing reached timeout_sec={timeout_sec}, stopping.")
 
     if not swcs:
         raise HTTPException(status_code=422, detail=f"{error_label} failed for auto and candidate seeds.")
@@ -255,49 +291,54 @@ def run_trace_iterative_with_noise_mask(
     tif_file: Path,
     workdir: Path,
     max_iters: int,
+    timeout_sec: int,
     min_nodes_to_accept: int,
-    run_once: Callable[[Path, Optional[Path]], bool],
+    run_once: Callable[[Path, Optional[Path], int], bool],
     error_label: str,
 ) -> Path:
     D, H, W = img_u8.shape
     swcs: List[Swc] = []
 
     denoise_flag = False
-    for it in range(max_iters):
-        tiff.imwrite(tif_file, img_u8)
-        swc_file = workdir / f"output_{it:03d}.swc"
-
-        ok = run_once(swc_file)
-        swc = Swc(swc_file) if ok else Swc()
-        node_num = len(swc.nodes)
-
-        # If still no trace but foreground is non-trivial, denoise and retry next iteration.
-        if node_num == 0:
-            if not denoise_flag and int(np.count_nonzero(img_u8 > 0)) > 10:
-                denoise_flag=True
-                denoise_foreground_components_inplace(img_u8)
-                print(f"Iteration {it}: Denoised foreground components, retrying.")
+    try:
+        with timeout(timeout_sec) as remaining_timeout:
+            for it in range(max_iters):
                 tiff.imwrite(tif_file, img_u8)
-                ok = run_once(swc_file)
+                swc_file = workdir / f"output_{it:03d}.swc"
+
+                ok = run_once(swc_file, None, remaining_timeout())
                 swc = Swc(swc_file) if ok else Swc()
                 node_num = len(swc.nodes)
-            else:
-                break
-        
-        if node_num == 0 or not ok:
-            break
 
-        if node_num >= min_nodes_to_accept and swc.length > 3.0:
-            swcs.append(swc)
+                # If still no trace but foreground is non-trivial, denoise and retry next iteration.
+                if node_num == 0:
+                    if not denoise_flag and int(np.count_nonzero(img_u8 > 0)) > 10:
+                        denoise_flag=True
+                        denoise_foreground_components_inplace(img_u8)
+                        print(f"Iteration {it}: Denoised foreground components, retrying.")
+                        tiff.imwrite(tif_file, img_u8)
+                        ok = run_once(swc_file, None, remaining_timeout())
+                        swc = Swc(swc_file) if ok else Swc()
+                        node_num = len(swc.nodes)
+                    else:
+                        break
 
-        # Mask traced tree out, then continue.
-        mask = swc_to_mask_sphere_cone(
-            swc_file,
-            shape=(D, H, W),
-            foreground_value=1,
-            r_scale=3.0,
-        )
-        img_u8[mask > 0] = np.uint8(0)
+                if node_num == 0 or not ok:
+                    break
+
+                if node_num >= min_nodes_to_accept and swc.length > 3.0:
+                    swcs.append(swc)
+
+                # Mask traced tree out, then continue.
+                mask = swc_to_mask_sphere_cone(
+                    swc_file,
+                    shape=(D, H, W),
+                    foreground_value=1,
+                    r_scale=3.0,
+                )
+                img_u8[mask > 0] = np.uint8(0)
+    except TraceTimeoutError:
+        print(f"{error_label}: iterative tracing reached timeout_sec={timeout_sec}, stopping.")
 
     if len(swcs) == 0:
         swc_merged = Swc()
