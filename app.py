@@ -1,22 +1,31 @@
 from __future__ import annotations
-import os
-import signal
-import shutil
-import subprocess
 import threading
-import time
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable, List, Optional
-import tifffile as tiff
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
-import asyncio
-import shutil
-from datetime import datetime
+from typing import Optional
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
-from vaa3d_utils import *
+from app_helpers import (
+    check_suffix,
+    cleanup_runs_worker,
+    ensure_executable,
+    file_response_or_500,
+    make_workdir,
+    prepare_tif_input,
+    prepare_trace_volume,
+    prepare_trace_volume_input,
+    run_cmd,
+    save_upload_to,
+)
+from swclib.data.swc import Swc
+from subtree_utils import filter_swc_subtree, normalize_seed_pairs, parse_seed_points, zip_swc_files
+from vaa3d_utils import (
+    TraceTimeoutError,
+    postprocess_vaa3d_result,
+    run_trace_iterative_with_noise_mask,
+    run_trace_iterative_with_seed_fallback,
+    write_marker_file
+)
 
 
 
@@ -33,35 +42,10 @@ VAA3D_BIN = BASE_DIR / "algorithms" / "Vaa3D-x.1.1.4_Ubuntu" / "Vaa3D-x"
 # VAA3D_BIN = Path("/data1/yangzekang/neuron/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x")
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def ensure_executable(path: Path, name: str = "binary") -> None:
-    if not path.exists():
-        raise HTTPException(status_code=500, detail=f"{name} not found: {path}")
-    if not os.access(path, os.X_OK):
-        raise HTTPException(status_code=500, detail=f"{name} not executable: {path}")
-
-
-def cleanup_runs_worker(interval_hours: int = 0.5, max_age_hours: int = 1) -> None:
-    """Periodically delete old run directories under RUNS_DIR."""
-    while True:
-        now = time.time()
-        if RUNS_DIR.exists():
-            for d in RUNS_DIR.iterdir():
-                if not d.is_dir():
-                    continue
-                age_hours = (now - d.stat().st_mtime) / 3600
-                if age_hours > max_age_hours:
-                    print(f"[cleanup] removing {d} (age={age_hours:.2f}h)")
-                    shutil.rmtree(d, ignore_errors=True)
-        time.sleep(int(interval_hours * 3600))
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
-    t = threading.Thread(target=cleanup_runs_worker, daemon=True)
+    t = threading.Thread(target=cleanup_runs_worker, args=(RUNS_DIR,), daemon=True)
     t.start()
     yield
 
@@ -69,121 +53,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-# def make_workdir() -> Path:
-#     workdir = RUNS_DIR / str(uuid.uuid4())
-#     workdir.mkdir(parents=True, exist_ok=True)
-#     return workdir
-
-def make_workdir(max_retries: int = 1000) -> Path:
-    base_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 到毫秒
-
-    for i in range(max_retries):
-        name = base_name if i == 0 else f"{base_name}_{i}"
-        workdir = RUNS_DIR / name
-        try:
-            workdir.mkdir(parents=True, exist_ok=False)
-            return workdir
-        except FileExistsError:
-            continue
-
-    raise RuntimeError(f"Failed to create unique workdir after {max_retries} retries.")
-
-
-async def save_upload_to(upload: UploadFile, dst: Path) -> None:
-    """Save UploadFile to dst, then close upload."""
-    try:
-        with dst.open("wb") as f:
-            shutil.copyfileobj(upload.file, f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save upload: {e}")
-    finally:
-        await upload.close()
-
-
-def check_suffix(filename: str) -> None:
-    suffix = Path(filename).suffix.lower()
-    if suffix not in ALLOWED_EXT:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
-
-
-def run_cmd(cmd: List[str], log_path: Path, workdir: Path, timeout_sec: int = 3600) -> None:
-    """Run a command, writing stdout+stderr to log_path."""
-    proc = None
-    try:
-        with log_path.open("wb") as logf:
-            print("[run]", " ".join(cmd))
-            proc = subprocess.Popen(
-                cmd,
-                stdout=logf,
-                stderr=subprocess.STDOUT,
-                cwd=str(workdir),
-                start_new_session=True,
-            )
-            try:
-                proc.wait(timeout=timeout_sec)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-                return False
-
-            if proc.returncode != 0:
-                try:
-                    text = log_path.read_text(errors="ignore")[-5000:]
-                except Exception:
-                    text = "(failed to read log)"
-                raise HTTPException(status_code=500, detail=f"Command failed. Tail log:\n{text}")
-    except subprocess.TimeoutExpired:
-        # raise HTTPException(status_code=504, detail="Command timed out")
-        return False
-    except BaseException:
-        if proc is not None and proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-        raise
-    return True
-
-
-def file_response_or_500(path: Path, filename: str = "output.swc") -> FileResponse:
-    if not path.exists() or path.stat().st_size == 0:
-        raise HTTPException(status_code=500, detail=f"{filename} not generated or empty")
-    return FileResponse(
-        path=str(path),
-        media_type="application/octet-stream",
-        filename=filename,
-    )
-
-
-async def prepare_trace_volume(file: UploadFile) -> tuple[Path, Path, Path, np.ndarray, int]:
-    """Common preprocessing for tracing routes."""
-    check_suffix(file.filename)
-    ensure_executable(VAA3D_BIN, name="Vaa3D")
-
-    workdir = make_workdir()
-    local_input = workdir / "vol.tiff"
-    local_log = workdir / "log.txt"
-    await save_upload_to(file, local_input)
-
-    img = tiff.imread(local_input)
-    img_u8 = to_uint8_0_255(img)
-    if img_u8.ndim != 3:
-        raise HTTPException(status_code=400, detail=f"Expected 3D volume, got shape={img_u8.shape}")
-
-    _, H, _ = img_u8.shape
-    tif_file = workdir / "vol_uint8.tiff"
-    tiff.imwrite(tif_file, img_u8)
-    return workdir, local_input, local_log, img_u8, H
-
-
 # -----------------------------
 # Routes
 # -----------------------------
 @app.post("/trace_neutube")
 async def trace_neutube(file: UploadFile = File(...)):
-    check_suffix(file.filename)
+    check_suffix(file.filename, ALLOWED_EXT)
 
     ensure_executable(NEUTUBE_BIN, name="neuTube")
 
-    workdir = make_workdir()
+    workdir = make_workdir(RUNS_DIR)
     local_input = workdir / "vol.tiff"
     local_output = workdir / "output.swc"
     local_log = workdir / "log.txt"
@@ -204,10 +83,60 @@ async def trace_neutube(file: UploadFile = File(...)):
 
     return file_response_or_500(local_output, filename="output.swc")
 
+@app.post("/trace_neutube_subtree")
+async def trace_neutube_subtree(
+    file: Optional[UploadFile] = File(None),
+    tif_path: Optional[str] = Form(None),
+    s1: str = Form(...),
+    s2: str = Form(...),
+):
+    ensure_executable(NEUTUBE_BIN, name="neuTube")
+
+    seed1 = parse_seed_points(s1, "s1")
+    seed2 = parse_seed_points(s2, "s2")
+
+    workdir = make_workdir(RUNS_DIR)
+    local_input = await prepare_tif_input(
+        file=file,
+        tif_path=tif_path,
+        workdir=workdir,
+        allowed_ext=ALLOWED_EXT,
+    )
+    full_output = workdir / "output_full.swc"
+    subtree_output = workdir / "subtree.swc"
+    local_log = workdir / "log.txt"
+
+    cmd = [
+        str(NEUTUBE_BIN),
+        "--command",
+        str(local_input),
+        "--trace",
+        "-o",
+        str(full_output),
+        "--level",
+        "0",
+    ]
+    run_cmd(cmd, local_log, workdir)
+
+    if not full_output.exists() or full_output.stat().st_size == 0:
+        raise HTTPException(status_code=500, detail="neuTube did not generate a valid SWC")
+
+    subtree_outputs = filter_swc_subtree(full_output, subtree_output, seed1, seed2)
+    if len(subtree_outputs) == 1:
+        return file_response_or_500(subtree_outputs[0], filename="subtree.swc")
+
+    zip_path = workdir / "subtrees.zip"
+    return zip_swc_files(subtree_outputs, zip_path)
+
 
 @app.post("/trace_vaa3d_app2")
 async def trace_vaa3d_app2(file: UploadFile = File(...)):
-    workdir, _, local_log, img_u8, H = await prepare_trace_volume(file)
+    workdir, _, local_log, img_u8, H = await prepare_trace_volume(
+        file,
+        vaa3d_bin=VAA3D_BIN,
+        runs_dir=RUNS_DIR,
+        allowed_ext=ALLOWED_EXT,
+    )
     tif_file = workdir / "vol_uint8.tiff"
 
     # Iterative tracing settings
@@ -261,22 +190,95 @@ async def trace_vaa3d_app2(file: UploadFile = File(...)):
         error_label="APP2",
     )
 
-    # merged_swc = run_trace_iterative_with_noise_mask(
-    #     img_u8=img_u8,
-    #     tif_file=tif_file,
-    #     workdir=workdir,
-    #     max_iters=max_iters,
-    #     min_nodes_to_accept=min_nodes_to_accept,
-    #     run_once=_run_app2,
-    #     error_label="APP2",
-    # )
-
     return file_response_or_500(merged_swc, filename="output.swc")
+
+
+@app.post("/trace_vaa3d_app2_subtree")
+async def trace_vaa3d_app2_subtree(
+    file: Optional[UploadFile] = File(None),
+    tif_path: Optional[str] = Form(None),
+    s1: str = Form(...),
+    s2: str = Form(...),
+):
+    workdir, _, local_log, img_u8, H = await prepare_trace_volume_input(
+        file=file,
+        tif_path=tif_path,
+        vaa3d_bin=VAA3D_BIN,
+        runs_dir=RUNS_DIR,
+        allowed_ext=ALLOWED_EXT,
+    )
+    tif_file = workdir / "vol_uint8.tiff"
+    seed_pairs = normalize_seed_pairs(
+        parse_seed_points(s1, "s1"),
+        parse_seed_points(s2, "s2"),
+    )
+
+    # Iterative tracing settings
+    timeout_sec = 600
+
+    def _run_app2(out_swc: Path, marker_file: Optional[Path] = None, timeout_sec: int = 3600) -> bool:
+        marker_arg = str(marker_file) if marker_file is not None else "None"
+        cmd = [
+            str(VAA3D_BIN),
+            "-x", "vn2",
+            "-f", "app2",
+            "-i", str(tif_file),
+            "-o", str(out_swc),
+            "-p",
+            marker_arg,        # inmarker_file
+            "0",               # channel
+            "10",              # bkg_thresh
+            "0",               # b_256cube
+            "1",               # b_radiusFrom2D
+            "0",               # is_gsdt
+            "0",               # is_gap
+            "5",               # length_thresh
+            "1",               # is_resample
+            "0",               # is_brightfield
+            "0",               # is_high_intensity
+        ]
+        try:
+            run_cmd(cmd, local_log, workdir, timeout_sec)
+            if not out_swc.exists() or out_swc.stat().st_size == 0:
+                return False
+        except TraceTimeoutError:
+            raise
+        except:
+            return False
+        postprocess_vaa3d_result(out_swc, maxy=H)
+        return True
+
+    D, H, W = img_u8.shape
+    subtree_outputs = []
+    for idx, (seed1, seed2) in enumerate(seed_pairs):
+        marker_file = workdir / f"app2_seed_{idx:03d}.marker"
+        full_output = workdir / f"app2_seed_{idx:03d}_full.swc"
+        subtree_output = workdir / (
+            "subtree.swc" if len(seed_pairs) == 1 else f"subtree_{idx:03d}.swc"
+        )
+
+        write_marker_file(marker_file, seed1, D, H, W)
+        ok = _run_app2(full_output, marker_file=marker_file, timeout_sec=timeout_sec)
+        if not ok or not full_output.exists() or full_output.stat().st_size == 0:
+            raise HTTPException(status_code=422, detail=f"APP2 failed for seed pair {idx}")
+
+        subtree_outputs.extend(filter_swc_subtree(full_output, subtree_output, seed1, seed2))
+
+    if len(subtree_outputs) == 1:
+        return file_response_or_500(subtree_outputs[0], filename="subtree.swc")
+
+    zip_path = workdir / "subtrees.zip"
+    return zip_swc_files(subtree_outputs, zip_path)
 
 
 @app.post("/trace_vaa3d_smartTrace")
 async def trace_vaa3d_smartTrace(file: UploadFile = File(...)):
-    workdir, _, local_log, img_u8, H = await prepare_trace_volume(file)
+    workdir, _, local_log, img_u8, H = await prepare_trace_volume(
+        file,
+        vaa3d_bin=VAA3D_BIN,
+        runs_dir=RUNS_DIR,
+        allowed_ext=ALLOWED_EXT,
+    )
     tif_file = workdir / "vol_uint8.tiff"
 
     # Iterative tracing settings
