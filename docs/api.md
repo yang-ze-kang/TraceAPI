@@ -1,4 +1,4 @@
-# TraceAPI API Reference
+# API Reference
 
 Base URL for local service examples:
 
@@ -6,7 +6,7 @@ Base URL for local service examples:
 http://127.0.0.1:8000
 ```
 
-The public GitHub Pages URL is documentation-only:
+The GitHub Pages URL is documentation-only:
 
 ```text
 https://yang-ze-kang.github.io/TraceAPI/
@@ -20,21 +20,23 @@ Supported image suffixes:
 .tif, .tiff, .png, .jpg, .jpeg
 ```
 
-Tracing routes expect 3D image volumes. Subtree routes accept seed points as:
+Tracing routes expect 3D image volumes.
+
+Subtree routes accept seed points as a single pair:
 
 ```text
 s1=242.8440,249.8640,7.9980
 s2=243.5728,248.0015,7.9980
 ```
 
-Batch seed pairs can be semicolon-separated:
+or multiple pairs:
 
 ```text
 s1=10,20,30;40,50,60
 s2=11,20,30;42,50,60
 ```
 
-or JSON:
+JSON arrays are also accepted:
 
 ```text
 s1=[[10,20,30],[40,50,60]]
@@ -47,17 +49,11 @@ Single seed-pair routes return one `.swc`; multiple seed pairs return `subtrees.
 
 Run neuTube tracing on an uploaded volume.
 
-### Form Fields
-
 | Name | Required | Type | Description |
 | --- | --- | --- | --- |
 | `file` | yes | file | Input volume. |
 
-### Response
-
-`output.swc`
-
-### Example
+Returns `output.swc`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/trace_neutube \
@@ -69,8 +65,6 @@ curl -X POST http://127.0.0.1:8000/trace_neutube \
 
 Run neuTube tracing, then extract directional subtrees from seed pairs.
 
-### Form Fields
-
 | Name | Required | Type | Description |
 | --- | --- | --- | --- |
 | `file` | one of `file`/`tif_path` | file | Uploaded input volume. |
@@ -78,11 +72,7 @@ Run neuTube tracing, then extract directional subtrees from seed pairs.
 | `s1` | yes | string | Start seed point(s). |
 | `s2` | yes | string | Direction seed point(s). |
 
-### Response
-
-`subtree.swc` for one pair, or `subtrees.zip` for multiple pairs.
-
-### Example
+Returns `subtree.swc` for one pair, or `subtrees.zip` for multiple pairs.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/trace_neutube_subtree \
@@ -96,17 +86,11 @@ curl -X POST http://127.0.0.1:8000/trace_neutube_subtree \
 
 Run iterative Vaa3D APP2 tracing on an uploaded volume.
 
-### Form Fields
-
 | Name | Required | Type | Description |
 | --- | --- | --- | --- |
 | `file` | yes | file | Input volume. |
 
-### Response
-
-`output.swc`
-
-### Example
+Returns `output.swc`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/trace_vaa3d_app2 \
@@ -118,8 +102,6 @@ curl -X POST http://127.0.0.1:8000/trace_vaa3d_app2 \
 
 Run Vaa3D APP2 from each `s1` marker, then apply the same `filter_swc_subtree` directional extraction used by neuTube subtree tracing.
 
-### Form Fields
-
 | Name | Required | Type | Description |
 | --- | --- | --- | --- |
 | `file` | one of `file`/`tif_path` | file | Uploaded input volume. |
@@ -127,11 +109,7 @@ Run Vaa3D APP2 from each `s1` marker, then apply the same `filter_swc_subtree` d
 | `s1` | yes | string | APP2 marker/start seed point(s). |
 | `s2` | yes | string | Direction seed point(s). |
 
-### Response
-
-`subtree.swc` for one pair, or `subtrees.zip` for multiple pairs.
-
-### Example
+Returns `subtree.swc` for one pair, or `subtrees.zip` for multiple pairs.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/trace_vaa3d_app2_subtree \
@@ -145,17 +123,11 @@ curl -X POST http://127.0.0.1:8000/trace_vaa3d_app2_subtree \
 
 Run iterative Vaa3D smartTrace tracing on an uploaded volume.
 
-### Form Fields
-
 | Name | Required | Type | Description |
 | --- | --- | --- | --- |
 | `file` | yes | file | Input volume. |
 
-### Response
-
-`output.swc`
-
-### Example
+Returns `output.swc`.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/trace_vaa3d_smartTrace \
@@ -163,9 +135,9 @@ curl -X POST http://127.0.0.1:8000/trace_vaa3d_smartTrace \
   --output smarttrace.swc
 ```
 
-## Subtree Extraction Notes
+## Subtree Extraction
 
-For each seed pair:
+For each ordered pair `s1 -> s2`:
 
 1. Find the closest SWC node to `s1`.
 2. Reroot the traced tree at that node.
