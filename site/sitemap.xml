@@ -2,14 +2,30 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://yang-ze-kang.github.io/TraceAPI/</loc>
-         <lastmod>2026-06-16</lastmod>
+         <lastmod>2026-06-22</lastmod>
+    </url>
+    <url>
+         <loc>https://yang-ze-kang.github.io/TraceAPI/algorithms/</loc>
+         <lastmod>2026-06-22</lastmod>
     </url>
     <url>
          <loc>https://yang-ze-kang.github.io/TraceAPI/api/</loc>
-         <lastmod>2026-06-16</lastmod>
+         <lastmod>2026-06-22</lastmod>
     </url>
     <url>
          <loc>https://yang-ze-kang.github.io/TraceAPI/deployment/</loc>
-         <lastmod>2026-06-16</lastmod>
+         <lastmod>2026-06-22</lastmod>
+    </url>
+    <url>
+         <loc>https://yang-ze-kang.github.io/TraceAPI/errors/</loc>
+         <lastmod>2026-06-22</lastmod>
+    </url>
+    <url>
+         <loc>https://yang-ze-kang.github.io/TraceAPI/examples/</loc>
+         <lastmod>2026-06-22</lastmod>
+    </url>
+    <url>
+         <loc>https://yang-ze-kang.github.io/TraceAPI/inputs/</loc>
+         <lastmod>2026-06-22</lastmod>
     </url>
 </urlset>

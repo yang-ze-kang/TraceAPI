@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
 import zipfile
 from pathlib import Path
 
+import numpy as np
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 from swclib.data.swc import Swc
 from swclib.data.swc_forest import SwcForest
+from swclib.geometry.Transformations import angle_between_vectors
 
 
 def parse_seed_point(value: str, name: str) -> tuple[float, float, float]:
@@ -82,14 +85,17 @@ def filter_one_swc_subtree(
     s1: tuple[float, float, float],
     s2: tuple[float, float, float],
 ) -> Path:
-    swc_name = Path(forest.name() or "input.swc").name
     sample_distance = sum((a - b) ** 2 for a, b in zip(s1, s2)) ** 0.5
     if sample_distance <= 0:
         raise HTTPException(status_code=400, detail="s1 and s2 must be different points")
 
     start_node, _ = forest.get_nearest_node(s1)
     if start_node is None:
-        raise HTTPException(status_code=422, detail=f"No valid SWC nodes found in {swc_name}")
+        # No traced node near s1: return a canonical empty (0-node) SWC so the
+        # result is a valid, detectable reconstruction rather than failing the
+        # whole (possibly batched) request.
+        Swc().save_to_swc(str(out_path))
+        return out_path
 
     rerooted_root = start_node.get_rerooted_tree(nid_start=1)
     rerooted_path = out_path.with_name(f"{out_path.stem}_rerooted.swc")
@@ -111,14 +117,29 @@ def filter_one_swc_subtree(
         raise HTTPException(status_code=422, detail="Resampled SWC has no root")
 
     rerooted_root = roots[0]
-    target_node, _ = resampled_forest.get_nearest_node(s2)
-    if target_node is None:
-        raise HTTPException(status_code=422, detail="Resampled SWC has no valid target node")
+    root_coord = (float(rerooted_root[0]), float(rerooted_root[1]), float(rerooted_root[2]))
+    # Measure the target direction from the branch point (the resampled root,
+    # i.e. the node nearest s1), not from s1 itself, so it shares an origin with
+    # the child-branch vectors below.
+    target_vec = np.asarray([b - a for a, b in zip(root_coord, s2)], dtype=float)
 
-    if len(rerooted_root.children) > 0:
+    if len(rerooted_root.children) > 0 and float(np.dot(target_vec, target_vec)) > 0:
+        def branch_angle(child) -> float:
+            child_vec = np.asarray((
+                float(child[0]) - root_coord[0],
+                float(child[1]) - root_coord[1],
+                float(child[2]) - root_coord[2],
+            ), dtype=float)
+            if float(np.dot(child_vec, child_vec)) <= 0:
+                return float("inf")
+            angle = float(angle_between_vectors(child_vec, target_vec))
+            # arccos can return NaN from float error pushing |cos| slightly > 1;
+            # treat as the worst angle so it is never selected by min().
+            return float("inf") if math.isnan(angle) else angle
+
         branch_root = min(
             rerooted_root.children,
-            key=lambda child: child.distance(target_node),
+            key=branch_angle,
         )
         for child in tuple(rerooted_root.children):
             if child is not branch_root:

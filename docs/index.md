@@ -61,5 +61,12 @@ curl -X POST http://127.0.0.1:8000/trace_vaa3d_app2_subtree \
   --output SN21_seed1_app2.swc
 ```
 
-See [API Reference](api.md) for all endpoints.
+## Documentation Map
+
+- [API Reference](api.md) — every endpoint, parameters, and responses.
+- [Input Formats](inputs.md) — accepted volumes and seed-point syntax.
+- [Errors](errors.md) — every status code and `detail` message.
+- [Algorithms](algorithms.md) — preprocessing, iterative tracing, subtree extraction.
+- [Client Examples](examples.md) — curl and Python usage, including a reusable client.
+- [Deployment](deployment.md) — serving the API and the docs.
 

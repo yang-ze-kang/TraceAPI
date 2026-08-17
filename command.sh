@@ -48,6 +48,11 @@ curl -X POST http://127.0.0.1:8000/trace_vaa3d_app2_subtree \
   -F "s1=242.8440,249.8640,7.9980" \
   -F "s2=243.5728,248.0015,7.9980" \
   --output SN21_seed1_app2.swc
+curl -X POST http://127.0.0.1:8000/trace_vaa3d_app2_subtree \
+  -F "tif_path=/data1/yangzekang/neuron/neuron-trace/outputs/cwmbs-pdpt/vnet-dice/2026-06-17-18-44-10/preds/SN21.tif" \
+  -F "s1=249.18,195.08,79.998" \
+  -F "s2=247.32,191.304,80.958" \
+  --output SN21_seed1_app2.swc
 
 # 2) 调 APP2 接口测试单个 tif（终端2）
 curl -X POST "http://127.0.0.1:8000/trace_vaa3d_app2" \
@@ -94,3 +99,18 @@ curl -X POST "http://127.0.0.1:8000/trace_neutube" \
 
 
 # Vaa3d用法
+algorithms/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x \
+  -x vn2 -f app2 \
+  -i /data2/public_data/CWMBS/image/SN21.tif \
+  -o SN21.swc \
+  -p SN21.marker 0 10 0 1 0 0 5 1 0
+algorithms/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x \
+  -x vn2 -f app2 \
+  -i /data1/yangzekang/neuron/neuron-trace/outputs/cwmbs-pdpt/vnet-dice/2026-06-17-18-44-10/preds/SN21.tif \
+  -o SN21-2.swc \
+  -p SN21.marker 0 10 0 1 0 0 5 1 0
+
+
+
+# URL subtree
+
