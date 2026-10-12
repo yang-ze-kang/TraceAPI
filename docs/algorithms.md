@@ -20,12 +20,33 @@ bounds.
 
 ## Preprocessing
 
-Every route normalizes the input the same way before tracing:
+The Vaa3D routes normalize the input before tracing:
 
 1. Read the volume with `tifffile`.
 2. Min-max scale to `uint8` `[0, 255]` (`to_uint8_0_255`).
 3. Require a 3D array.
 4. Write `vol_uint8.tiff` into the run directory as the tracer input.
+
+## Kimimaro (`/trace_kimimaro`, `/trace_kimimaro_subtree`)
+
+The backend follows `neuron-trace/postprocess/trace_kimimaro.py`, called by
+`skeleton.py` for the Kimimaro method:
+
+1. Read a nonnegative, finite 3D Z,Y,X TIFF without intensity normalization.
+2. Binarize at `foreground_thres * max(volume)` (default `0.5`). All-zero input
+   produces an empty SWC instead of treating zero background as foreground.
+3. Skeletonize with the original TEASAR settings (`scale=1.5`, `const=10`,
+   `pdrf_scale=100000`, `pdrf_exponent=2`, `max_paths=10000`), dust threshold
+   100, fixed branches/borders, and one worker.
+4. Reverse X,Y,Z anisotropy (default `0.35,0.35,1.0`) for the Z,Y,X array.
+   Convert the resulting physical Z,Y,X positions back to voxel X,Y,Z SWC
+   coordinates; preserve physical radii and do not flip Y.
+5. For subtrees, apply the shared directional filter to the full reconstruction
+   for each seed pair, with a 4-voxel root-snap limit and 2-voxel resampling.
+   Subtree radii are 1, as in the other subtree endpoints.
+
+Each request uses a subprocess with a 3000 s whole-volume or 600 s subtree
+timeout. Multiple pairs reuse the same skeleton and return a ZIP archive.
 
 ## neuTube (`/trace_neutube`, `/trace_neutube_subtree`)
 

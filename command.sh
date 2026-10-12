@@ -1,7 +1,7 @@
 Xvfb :99 -screen 0 1920x1080x24 -ac &
 export DISPLAY=:99
 # uvicorn app:app --host 0.0.0.0 --port 8000 --workers 32
-python -m uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
+python -m uvicorn app:app --host 0.0.0.0 --port 8000 --workers 8
 
 sudo apt-get install libglu1-mesa
 sudo apt-get install -y libqt5widgets5 libqt5gui5 libqt5xml5 libqt5network5 libqt5core5a
@@ -109,8 +109,3 @@ algorithms/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x \
   -i /data1/yangzekang/neuron/neuron-trace/outputs/cwmbs-pdpt/vnet-dice/2026-06-17-18-44-10/preds/SN21.tif \
   -o SN21-2.swc \
   -p SN21.marker 0 10 0 1 0 0 5 1 0
-
-
-
-# URL subtree
-

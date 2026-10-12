@@ -13,6 +13,11 @@ from swclib.data.swc_forest import SwcForest
 from swclib.geometry.Transformations import angle_between_vectors
 
 
+SUBTREE_RESAMPLE_DISTANCE = 2.0
+NEUTUBE_MAX_ROOT_SNAP_DISTANCE = 4.0
+APP2_MAX_ROOT_SNAP_DISTANCE = 8.0
+
+
 def parse_seed_point(value: str, name: str) -> tuple[float, float, float]:
     """Parse a seed point from 'x,y,z', 'x y z', or '[x,y,z]'."""
     cleaned = value.strip()
@@ -84,43 +89,25 @@ def filter_one_swc_subtree(
     out_path: Path,
     s1: tuple[float, float, float],
     s2: tuple[float, float, float],
+    *,
+    max_root_snap_distance: float = NEUTUBE_MAX_ROOT_SNAP_DISTANCE,
 ) -> Path:
-    sample_distance = sum((a - b) ** 2 for a, b in zip(s1, s2)) ** 0.5
-    if sample_distance <= 0:
+    if math.dist(s1, s2) <= 0:
         raise HTTPException(status_code=400, detail="s1 and s2 must be different points")
 
-    start_node, _ = forest.get_nearest_node(s1)
-    if start_node is None:
-        # No traced node near s1: return a canonical empty (0-node) SWC so the
-        # result is a valid, detectable reconstruction rather than failing the
-        # whole (possibly batched) request.
+    start_node, start_distance = forest.get_nearest_node(s1)
+    if start_node is None or start_distance > max_root_snap_distance:
+        # Do not create a long artificial edge from the supplied seed to an
+        # unrelated traced component. A canonical empty SWC lets batched
+        # requests continue while keeping the miss detectable by evaluation.
         Swc().save_to_swc(str(out_path))
         return out_path
 
     rerooted_root = start_node.get_rerooted_tree(nid_start=1)
-    rerooted_path = out_path.with_name(f"{out_path.stem}_rerooted.swc")
-    resampled_path = out_path.with_name(f"{out_path.stem}_rerooted_resampled.swc")
-    rerooted_root.get_subtree(nid_start=1).save_to_file(rerooted_path)
+    for axis, value in enumerate(s1):
+        rerooted_root[axis] = float(value)
 
-    rerooted_swc = Swc(rerooted_path)
-    resampled_swc = rerooted_swc.resample(min_distance=sample_distance, in_place=False)
-    resampled_swc.save_to_swc(
-        str(resampled_path),
-        write_header=False,
-        reindex=True,
-        radius=1,
-    )
-
-    resampled_forest = SwcForest(resampled_path)
-    roots = resampled_forest.get_roots()
-    if len(roots) == 0:
-        raise HTTPException(status_code=422, detail="Resampled SWC has no root")
-
-    rerooted_root = roots[0]
-    root_coord = (float(rerooted_root[0]), float(rerooted_root[1]), float(rerooted_root[2]))
-    # Measure the target direction from the branch point (the resampled root,
-    # i.e. the node nearest s1), not from s1 itself, so it shares an origin with
-    # the child-branch vectors below.
+    root_coord = tuple(float(value) for value in s1)
     target_vec = np.asarray([b - a for a, b in zip(root_coord, s2)], dtype=float)
 
     if len(rerooted_root.children) > 0 and float(np.dot(target_vec, target_vec)) > 0:
@@ -145,8 +132,19 @@ def filter_one_swc_subtree(
             if child is not branch_root:
                 child.parent = None
 
-    subtree = rerooted_root.get_subtree(nid_start=1)
-    subtree.save_to_file(out_path)
+    anchored_path = out_path.with_name(f"{out_path.stem}_anchored.swc")
+    rerooted_root.get_subtree(nid_start=1).save_to_file(anchored_path)
+    resampled_subtree = Swc(anchored_path).resample(
+        min_distance=SUBTREE_RESAMPLE_DISTANCE,
+        in_place=False,
+    )
+    resampled_subtree.save_to_swc(
+        str(out_path),
+        write_header=False,
+        float_fmt=".13e",
+        reindex=True,
+        radius=1,
+    )
     return out_path
 
 
@@ -155,14 +153,30 @@ def filter_swc_subtree(
     out_path: Path,
     s1: tuple[float, float, float] | list[tuple[float, float, float]],
     s2: tuple[float, float, float] | list[tuple[float, float, float]],
+    *,
+    max_root_snap_distance: float = NEUTUBE_MAX_ROOT_SNAP_DISTANCE,
 ) -> list[Path]:
     seed_pairs = normalize_seed_pairs(s1, s2)
-    forest = SwcForest(swc_path)
+    # First make the auto-traced tree spatially dense enough that nearest-node
+    # selection is not determined by the backend's arbitrary node spacing.
+    resampled_swc = Swc(swc_path).resample(
+        min_distance=SUBTREE_RESAMPLE_DISTANCE,
+        in_place=False,
+    )
+    forest = SwcForest(resampled_swc)
     suffix = out_path.suffix or ".swc"
     output_paths = []
     for idx, (seed1, seed2) in enumerate(seed_pairs):
         cur_out = out_path if len(seed_pairs) == 1 else out_path.with_name(f"{out_path.stem}_{idx:03d}{suffix}")
-        output_paths.append(filter_one_swc_subtree(forest, cur_out, seed1, seed2))
+        output_paths.append(
+            filter_one_swc_subtree(
+                forest,
+                cur_out,
+                seed1,
+                seed2,
+                max_root_snap_distance=max_root_snap_distance,
+            )
+        )
     return output_paths
 
 

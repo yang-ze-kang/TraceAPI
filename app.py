@@ -4,6 +4,20 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
+
+from kimimaro_utils import (
+    KIMIMARO_MAX_ROOT_SNAP_DISTANCE,
+    parse_anisotropy,
+    prepare_kimimaro_input,
+    run_kimimaro,
+)
+from spe_dnr_utils import (
+    SPE_DNR_MAX_ROOT_SNAP_DISTANCE,
+    prepare_spe_dnr_inputs,
+    run_spe_dnr,
+    validate_seed_pairs,
+)
 
 from app_helpers import (
     check_suffix,
@@ -18,7 +32,14 @@ from app_helpers import (
     save_upload_to,
 )
 from swclib.data.swc import Swc
-from subtree_utils import filter_swc_subtree, normalize_seed_pairs, parse_seed_points, zip_swc_files
+from subtree_utils import (
+    APP2_MAX_ROOT_SNAP_DISTANCE,
+    NEUTUBE_MAX_ROOT_SNAP_DISTANCE,
+    filter_swc_subtree,
+    normalize_seed_pairs,
+    parse_seed_points,
+    zip_swc_files,
+)
 from vaa3d_utils import (
     TraceTimeoutError,
     postprocess_vaa3d_result,
@@ -39,7 +60,7 @@ RUNS_DIR = BASE_DIR / "runs"
 
 NEUTUBE_BIN = BASE_DIR / "algorithms" / "neuTube"
 VAA3D_BIN = BASE_DIR / "algorithms" / "Vaa3D-x.1.1.4_Ubuntu" / "Vaa3D-x"
-# VAA3D_BIN = Path("/data1/yangzekang/neuron/Vaa3D-x.1.1.4_Ubuntu/Vaa3D-x")
+SPE_DNR_DIR = BASE_DIR / "algorithms" / "SPE-DNR"
 
 
 @asynccontextmanager
@@ -56,6 +77,57 @@ app = FastAPI(lifespan=lifespan)
 # -----------------------------
 # Routes
 # -----------------------------
+@app.post("/trace_kimimaro")
+async def trace_kimimaro(
+    file: Optional[UploadFile] = File(None),
+    tif_path: Optional[str] = Form(None),
+    foreground_thres: float = Form(0.5, gt=0, le=1),
+    kimimaro_anisotropy: str = Form("0.35,0.35,1.0"),
+):
+    """Skeletonize a 3D prediction/mask with Kimimaro and return voxel x,y,z."""
+    spacing_xyz = parse_anisotropy(kimimaro_anisotropy)
+    workdir, image, _ = await prepare_kimimaro_input(
+        file=file, tif_path=tif_path, runs_dir=RUNS_DIR,
+    )
+    output = await run_in_threadpool(
+        run_kimimaro, workdir=workdir, image=image,
+        foreground_thres=foreground_thres, kimimaro_anisotropy=spacing_xyz,
+        timeout_sec=3000,
+    )
+    return file_response_or_500(output, filename="output.swc")
+
+
+@app.post("/trace_kimimaro_subtree")
+async def trace_kimimaro_subtree(
+    s1: str = Form(...),
+    s2: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    tif_path: Optional[str] = Form(None),
+    foreground_thres: float = Form(0.5, gt=0, le=1),
+    kimimaro_anisotropy: str = Form("0.35,0.35,1.0"),
+):
+    """Skeletonize once, then select directional subtrees for seed pairs s1 -> s2."""
+    seed_pairs = normalize_seed_pairs(parse_seed_points(s1, "s1"), parse_seed_points(s2, "s2"))
+    spacing_xyz = parse_anisotropy(kimimaro_anisotropy)
+    workdir, image, shape_zyx = await prepare_kimimaro_input(
+        file=file, tif_path=tif_path, runs_dir=RUNS_DIR,
+    )
+    validate_seed_pairs(seed_pairs, shape_zyx)
+    output = await run_in_threadpool(
+        run_kimimaro, workdir=workdir, image=image,
+        foreground_thres=foreground_thres, kimimaro_anisotropy=spacing_xyz,
+        timeout_sec=600,
+    )
+    subtree_outputs = await run_in_threadpool(
+        filter_swc_subtree, output, workdir / "subtree.swc",
+        [pair[0] for pair in seed_pairs], [pair[1] for pair in seed_pairs],
+        max_root_snap_distance=KIMIMARO_MAX_ROOT_SNAP_DISTANCE,
+    )
+    if len(subtree_outputs) == 1:
+        return file_response_or_500(subtree_outputs[0], filename="subtree.swc")
+    return zip_swc_files(subtree_outputs, workdir / "subtrees.zip")
+
+
 @app.post("/trace_neutube")
 async def trace_neutube(file: UploadFile = File(...)):
     check_suffix(file.filename, ALLOWED_EXT)
@@ -126,7 +198,13 @@ async def trace_neutube_subtree(
             subtree_outputs.append(workdir / f"subtree_seed_{i}.swc")
         # raise HTTPException(status_code=500, detail="neuTube did not generate a valid SWC")
     else:
-        subtree_outputs = filter_swc_subtree(full_output, subtree_output, seed1, seed2)
+        subtree_outputs = filter_swc_subtree(
+            full_output,
+            subtree_output,
+            seed1,
+            seed2,
+            max_root_snap_distance=NEUTUBE_MAX_ROOT_SNAP_DISTANCE,
+        )
         
     if len(subtree_outputs) == 1:
         return file_response_or_500(subtree_outputs[0], filename="subtree.swc")
@@ -271,13 +349,74 @@ async def trace_vaa3d_app2_subtree(
             subtree_outputs.append(subtree_output)
             # raise HTTPException(status_code=422, detail=f"APP2 failed for seed pair {idx}")
         else:
-            subtree_outputs.extend(filter_swc_subtree(full_output, subtree_output, seed1, seed2))
+            subtree_outputs.extend(
+                filter_swc_subtree(
+                    full_output,
+                    subtree_output,
+                    seed1,
+                    seed2,
+                    max_root_snap_distance=APP2_MAX_ROOT_SNAP_DISTANCE,
+                )
+            )
 
     if len(subtree_outputs) == 1:
         return file_response_or_500(subtree_outputs[0], filename="subtree.swc")
 
     zip_path = workdir / "subtrees.zip"
     return zip_swc_files(subtree_outputs, zip_path)
+
+
+@app.post("/trace_spe_dnr")
+async def trace_spe_dnr(
+    file: Optional[UploadFile] = File(None),
+    tif_path: Optional[str] = Form(None),
+    mask_file: Optional[UploadFile] = File(None),
+    mask_path: Optional[str] = Form(None),
+    soma_file: Optional[UploadFile] = File(None),
+    soma_path: Optional[str] = Form(None),
+):
+    """Trace original image using VNet centerline probabilities or binary mask."""
+    workdir, image, mask, soma, _ = await prepare_spe_dnr_inputs(
+        file=file, tif_path=tif_path, mask_file=mask_file, mask_path=mask_path,
+        soma_file=soma_file, soma_path=soma_path, runs_dir=RUNS_DIR,
+    )
+    output = await run_in_threadpool(
+        run_spe_dnr, project_dir=SPE_DNR_DIR, workdir=workdir,
+        image=image, mask=mask, soma=soma, timeout_sec=3000,
+    )
+    return file_response_or_500(output, filename="output.swc")
+
+
+@app.post("/trace_spe_dnr_subtree")
+async def trace_spe_dnr_subtree(
+    s1: str = Form(...),
+    s2: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    tif_path: Optional[str] = Form(None),
+    mask_file: Optional[UploadFile] = File(None),
+    mask_path: Optional[str] = Form(None),
+    soma_file: Optional[UploadFile] = File(None),
+    soma_path: Optional[str] = Form(None),
+):
+    """Trace once with VNet seeds, then select directional subtrees s1 -> s2."""
+    seed_pairs = normalize_seed_pairs(parse_seed_points(s1, "s1"), parse_seed_points(s2, "s2"))
+    workdir, image, mask, soma, shape = await prepare_spe_dnr_inputs(
+        file=file, tif_path=tif_path, mask_file=mask_file, mask_path=mask_path,
+        soma_file=soma_file, soma_path=soma_path, runs_dir=RUNS_DIR,
+    )
+    validate_seed_pairs(seed_pairs, shape)
+    output = await run_in_threadpool(
+        run_spe_dnr, project_dir=SPE_DNR_DIR, workdir=workdir,
+        image=image, mask=mask, soma=soma, timeout_sec=600,
+    )
+    subtree_outputs = await run_in_threadpool(
+        filter_swc_subtree, output, workdir / "subtree.swc",
+        [pair[0] for pair in seed_pairs], [pair[1] for pair in seed_pairs],
+        max_root_snap_distance=SPE_DNR_MAX_ROOT_SNAP_DISTANCE,
+    )
+    if len(subtree_outputs) == 1:
+        return file_response_or_500(subtree_outputs[0], filename="subtree.swc")
+    return zip_swc_files(subtree_outputs, workdir / "subtrees.zip")
 
 
 @app.post("/trace_vaa3d_smartTrace")

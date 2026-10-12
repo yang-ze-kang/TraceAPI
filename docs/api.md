@@ -17,6 +17,8 @@ https://yang-ze-kang.github.io/TraceAPI/
 
 | Method & Path | Input | Success response |
 | --- | --- | --- |
+| `POST /trace_kimimaro` | prediction/mask `file` or `tif_path` | `output.swc` |
+| `POST /trace_kimimaro_subtree` | prediction/mask `file` or `tif_path`, `s1`, `s2` | `subtree.swc` or `subtrees.zip` |
 | `POST /trace_neutube` | `file` | `output.swc` |
 | `POST /trace_neutube_subtree` | `file` or `tif_path`, `s1`, `s2` | `subtree.swc` or `subtrees.zip` |
 | `POST /trace_vaa3d_app2` | `file` | `output.swc` |
@@ -30,6 +32,37 @@ archives (`application/zip`).
 See [Input Formats](inputs.md) for seed/volume rules and [Errors](errors.md)
 for status codes. For request/response snippets in `curl` and Python, see
 [Client Examples](examples.md).
+
+## `POST /trace_kimimaro` and `POST /trace_kimimaro_subtree`
+
+Skeletonize a scalar 3D prediction/mask TIFF with Kimimaro. The subtree route
+traces once, then extracts branches in the directions given by `s1 -> s2`.
+
+| Name | Required | Type | Description |
+| --- | --- | --- | --- |
+| `file` | one of `file`/`tif_path` | file | Uploaded TIFF in Z,Y,X order. |
+| `tif_path` | one of `file`/`tif_path` | string | Server-side TIFF path. |
+| `foreground_thres` | no | float | Fraction of input maximum, default `0.5`, range `(0,1]`. |
+| `kimimaro_anisotropy` | no | string | Positive X,Y,Z voxel spacings, default `0.35,0.35,1.0`. |
+| `s1` | subtree only | string | Start seed point(s), in voxel X,Y,Z. |
+| `s2` | subtree only | string | Direction seed point(s), in voxel X,Y,Z. |
+
+**Returns:** `output.swc` for the full route; `subtree.swc` for one seed pair,
+or `subtrees.zip` for multiple pairs. Coordinates are zero-based voxel X,Y,Z.
+Empty foreground or a subtree root more than 4 voxels from the skeleton yields
+a header-only SWC. Invalid TIFFs, anisotropy, or seed pairs return HTTP 400;
+invalid numeric thresholds return HTTP 422. Subprocess timeouts return HTTP 504
+(3000 s for the full route, 600 s for subtrees).
+
+```bash
+curl -X POST http://127.0.0.1:8000/trace_kimimaro \
+  -F 'file=@/path/to/prediction.tif' --output kimimaro.swc
+
+curl -X POST http://127.0.0.1:8000/trace_kimimaro_subtree \
+  -F 'tif_path=/path/to/prediction.tif' \
+  -F 's1=10,20,30;40,50,60' -F 's2=12,20,30;42,50,60' \
+  --output subtrees.zip
+```
 
 ## `POST /trace_neutube`
 

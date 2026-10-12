@@ -1,0 +1,6 @@
+fastapi>=0.100,<1
+uvicorn>=0.23,<1
+python-multipart>=0.0.18
+swclib
+kimimaro>=5.8,<6
+-r algorithms/SPE-DNR/requirements.txt
